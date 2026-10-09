@@ -30,7 +30,7 @@ Nothing in this file invents story content. Empty slots use TBD tokens.
 
 ## Build steps (stop after each for approval)
 
-1. **Server.** Done and committed. Tested in JSON-file mode (26 checks pass). Postgres path still to be tested.
+1. **Server.** Done and committed. Tested in JSON-file mode and against a real Postgres 16 (same checks, all pass).
 2. **Client.** Violet look in WebGL, story-time helix, era bands, outer ring, scrub strip, node panel with image upload and gallery, History overlay. Built in small slices with screenshots.
 3. **Seeding.** Split THE THROAT text into nodes, review with Maridizzle, then save.
 4. **Deploy notes for Railway.** Maridizzle deploys.
@@ -52,7 +52,7 @@ Env vars: `APP_PASSWORD` (required), `DATABASE_URL` (Railway Postgres; absent me
 - What the client shows when a save returns a conflict.
 - Browser image resize dimensions (Saintalia uses JPEG quality 0.82; its dimensions were not read).
 - Model IDs in the older tools (`claude-sonnet-4-6`, `claude-opus-5`) were not verified. Irrelevant until an AI proxy is added.
-- Postgres code path not yet run against a real Postgres.
+- The change counter (`seq`) is assigned when a write starts, not when it commits. Overlapping writes could be missed by a poller, so the client re-requests with a small overlap (rows carry a revision, so repeats are harmless).
 
 ## Research notes
 

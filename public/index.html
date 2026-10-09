@@ -1,0 +1,47 @@
+<!doctype html>
+<!-- The Throat client shell. Signed Maridizzle -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>The Throat</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@500;700&family=Crimson+Pro:ital,wght@0,400;0,600;1,400&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="css/throat.css">
+</head>
+<body class="q2">
+<canvas id="c" aria-label="Story map. Drag to orbit, scroll to fly in and out."></canvas>
+<div id="labels" aria-hidden="true"></div>
+<div class="vig"></div>
+<div class="grain"></div>
+
+<div class="panel" id="title">
+  <h1>THE THROAT</h1>
+  <p id="sync">Connecting...</p>
+</div>
+
+<div class="panel" id="legend"><h2>Layers</h2></div>
+
+<div class="panel" id="detail" aria-live="polite"></div>
+
+<div class="panel" id="hint">Drag to orbit. Scroll to fly in and out. W / S glide, A / D turn. Click a node to fly to it.</div>
+
+<div class="panel" id="mini"><canvas id="mm" width="150" height="150"></canvas><small>OVERVIEW</small></div>
+
+<div class="panel" id="controls">
+  <label>Quality
+    <select id="qsel"><option value="0">Low</option><option value="1">Medium</option><option value="2" selected>High</option></select>
+  </label>
+  <label><input type="checkbox" id="calm"> Calm mode</label>
+  <button id="reset" type="button">Reset view</button>
+</div>
+
+<div id="state" class="panel" role="status"></div>
+
+<noscript><div class="panel" style="top:50%;left:50%;transform:translate(-50%,-50%);padding:22px 28px">This map needs JavaScript.</div></noscript>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script src="js/app.js"></script>
+</body>
+</html>
