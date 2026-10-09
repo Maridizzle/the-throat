@@ -30,6 +30,9 @@ Nothing in this file invents story content. Empty slots use TBD tokens.
 | Writer identity | The server stamps who saved each node, setting, hide and restore (`updated_by`) and who made each backup (`created_by`). The browser cannot fake it. Names are whatever Maridizzle sets, never invented. |
 | Presence | Other writers show as a ring and name tag in their own color on the node they are viewing, with "is editing", plus an online list and a ring on the timeline strip. Refreshes every 5 seconds and drops about 25 seconds after a tab closes. Hidden in shared-password mode. |
 | Seeding | Done as an import, not a script. THE THROAT's text was split by section into 34 nodes using the exact words (checked word for word against the source). Only formatting was cleaned: invisible characters removed, hard line wraps re-joined, bullet glyphs turned into dashes. The seven character sheets were folded into the cast nodes (blank fields left out). Nodes start untimed and unlinked. The seed file is kept out of GitHub and loaded with the Import button (preview first, skips anything already there). |
+| Layers lists | Each layer row has an arrow that lists every node in that layer, alphabetically. Clicking a name selects it and flies to it; the selected one is highlighted. Lists stay open across refreshes and update by themselves. A node in a layer that is switched off is selected without turning the layer on. On phones the arrow opens a pop-up. |
+| Export | A read-only Export menu with two downloads, both made from what is already loaded, with nothing written to the server. Readable copy (`.md`): one file, a section per layer, every node's text word for word, story time, links both ways, who changed it last, hidden nodes in their own marked section, images listed by count and caption but not included. It is not a restore point. Full backup (`.json`): the server's archive, with images and every automatic backup; this is the one to restore from. |
+| Live data care | The site now holds the real story. Backups live in the same database as the story, so a copy saved on the writer's own computer (Export) is the only protection that does not depend on Railway. All testing uses throwaway local data, never the live database. Nothing is pushed without Maridizzle's typed yes. |
 | Removal | Hide and unhide only. Nothing is hard-deleted. |
 | Backup pruning | Off by default. Opt in with `BACKUP_KEEP`. |
 | Calm mode | Stops drift and pulses. Follows `prefers-reduced-motion`. |
@@ -46,9 +49,11 @@ Order set by Maridizzle: put it on Railway first, then writer logins, then seed 
    - 2c: node editor, side-by-side conflicts, hide and Hidden list, eras editor.
    - 2d: per-node images, lightbox, server image validation.
    - Import: the three new types and the Import button with a preview.
+   - Layers lists: the node list under each layer.
+   - Export: the readable copy (`.md`) and the full backup (`.json`) buttons.
 3. **Railway deploy.** Done by Maridizzle. Checklist below.
 4. **Writer logins.** Built and tested (server L1, client L2), including two real browser sessions at once. Turning it on is a Railway variable change by Maridizzle (see the checklist, step 7).
-5. **Seeding.** The seed file is built and the Import button is built and tested. Maridizzle imports it on the live site after this update is deployed, then places nodes in story time and adds links (story decisions for Maridizzle).
+5. **Seeding.** Done. The 34 sections were imported on the live site (Maridizzle confirmed it worked). What remains is Maridizzle's: placing nodes in story time, adding links, and retyping any seeded node whose type was a best guess.
 6. **History screen.** Not built yet: a list of backups with who made each one and a restore button. Backups, attribution and undoable restore already work through the API. Position in the order to be decided.
 
 ## Server API (step 1)

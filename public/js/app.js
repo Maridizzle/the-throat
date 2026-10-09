@@ -426,6 +426,27 @@ function showState(title, msg, retry) {
 }
 const hideState = () => $("state").classList.remove("show");
 
+// Layers: a checkbox per type plus an arrow that lists every node in that layer (alphabetical).
+// On a phone the list opens in a pop-up, because the panel is a single row of chips there.
+const openLayers = new Set(); // which layer lists are open; survives the map refreshing
+const isPhone = () => matchMedia("(max-width:860px)").matches;
+const nodesOfType = (k) => graph.nodes.filter((n) => n.type === k).sort((a, b) => a.name.localeCompare(b.name));
+function layerButtons(k, onPick) {
+  return nodesOfType(k).map((n) => el("button", { type: "button", "data-id": n.id, title: n.name, onclick: () => onPick(n.id) }, n.name));
+}
+function markLayerSelection() {
+  for (const b of document.querySelectorAll("#legend .lnodes button")) {
+    const on = b.dataset.id === selectedId;
+    b.classList.toggle("sel", on);
+    if (on) b.setAttribute("aria-current", "true"); else b.removeAttribute("aria-current");
+  }
+}
+function openLayerPopup(k) {
+  const t = TYPES[k], ul = el("ul", { class: "hl lpop" });
+  for (const b of layerButtons(k, (id) => { closeModal(); select(id); })) ul.append(el("li", null, b));
+  if (!ul.children.length) ul.append(el("li", { class: "dim" }, "No nodes in this layer."));
+  openModal(t.label + " (" + ul.querySelectorAll("button").length + ")", ul, [{ label: "Close", kind: "quiet", onclick: closeModal }]);
+}
 function buildLegend() {
   const lg = $("legend"), counts = {};
   for (const n of graph.nodes) counts[n.type] = (counts[n.type] || 0) + 1;
@@ -438,8 +459,29 @@ function buildLegend() {
     cb.addEventListener("change", () => { cb.checked ? hidden.delete(k) : hidden.add(k); applyVisibility(); });
     const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
     svg.setAttribute("viewBox", "0 0 18 18"); svg.setAttribute("aria-hidden", "true"); svg.innerHTML = icons[t.shape];
-    lg.append(el("label", { style: "color:" + t.hex }, cb, svg, el("span", { style: "color:var(--text)" }, t.label), el("span", { class: "n" }, counts[k] || 0)));
+    const open = openLayers.has(k) && !isPhone();
+    const listId = "lnodes-" + k;
+    const arrow = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    arrow.setAttribute("viewBox", "0 0 12 12"); arrow.setAttribute("aria-hidden", "true"); arrow.innerHTML = '<path d="M4 2l4 4-4 4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>';
+    const ul = el("ul", { class: "lnodes", id: listId });
+    ul.hidden = !open;
+    if (open) for (const b of layerButtons(k, (id) => select(id))) ul.append(el("li", null, b));
+    const btn = el("button", { type: "button", class: "exp", "aria-expanded": String(open), "aria-controls": listId,
+      "aria-label": (open ? "Hide the list of " : "Show the list of ") + t.label + " nodes" }, arrow);
+    btn.addEventListener("click", () => {
+      if (isPhone()) { openLayerPopup(k); return; }
+      const nowOpen = ul.hidden; // it is about to open
+      ul.hidden = !nowOpen;
+      btn.setAttribute("aria-expanded", String(nowOpen));
+      btn.setAttribute("aria-label", (nowOpen ? "Hide the list of " : "Show the list of ") + t.label + " nodes");
+      if (nowOpen) { openLayers.add(k); ul.replaceChildren(...layerButtons(k, (id) => select(id)).map((b) => el("li", null, b))); markLayerSelection(); }
+      else openLayers.delete(k);
+    });
+    lg.append(el("div", { class: "layer" },
+      el("label", { style: "color:" + t.hex }, cb, svg, el("span", { style: "color:var(--text)" }, t.label), el("span", { class: "n" }, counts[k] || 0)),
+      btn), ul);
   }
+  markLayerSelection();
 }
 function relTime(iso) {
   const s = Math.max(0, (Date.now() - new Date(iso).getTime()) / 1000);
@@ -499,6 +541,7 @@ function select(id) {
   if (n) goal.set(n.x, n.y, n.z);
   refreshLinkEmphasis();
   showDetail();
+  markLayerSelection();
   pingSoon();
 }
 function refreshLinkEmphasis() {
@@ -1088,6 +1131,104 @@ function openImport() {
   ui.btns.go.disabled = true;
 }
 $("importBtn").addEventListener("click", openImport);
+
+/* export: read-only copies of everything, made in the browser from what is already loaded.
+ * Nothing here writes to the server. The readable copy (.md) is for reading and keeping;
+ * the full backup (.json) is the server's own archive and is the one to restore from. */
+const mdEsc = (s) => String(s == null ? "" : s).replace(/</g, "\\<").replace(/^(\s*)#/gm, "$1\\#"); // no stray HTML or headings from user text
+const utcStamp = (d) => (isFinite(d) ? d.toISOString().slice(0, 16).replace("T", " ") + " UTC" : "");
+const todayStamp = () => new Date().toISOString().slice(0, 10);
+function buildMarkdown() {
+  const rows = [...model.rows.values()];
+  const visible = rows.filter((r) => !r.hidden), hiddenRows = rows.filter((r) => r.hidden);
+  const byId = new Map(rows.map((r) => [r.id, r]));
+  const dataOf = (r) => r.data || {};
+  const nameOf = (r) => String(dataOf(r).name || r.id);
+  const typeOf = (r) => (TYPES[dataOf(r).type] ? dataOf(r).type : "other");
+  const linksOf = (r) => (Array.isArray(dataOf(r).links) ? dataOf(r).links.filter((l) => l && byId.has(l.to)) : []);
+  const incoming = new Map();
+  for (const r of rows) for (const l of linksOf(r)) { if (!incoming.has(l.to)) incoming.set(l.to, []); incoming.get(l.to).push({ from: r, label: l.label || "" }); }
+  const tag = (r) => (r.hidden ? " (hidden)" : "");
+  const byAlpha = (a, b) => nameOf(a).localeCompare(nameOf(b));
+  const out = [];
+  out.push("# THE THROAT: readable copy", "",
+    "Saved: " + utcStamp(new Date()), "",
+    visible.length + " nodes" + (hiddenRows.length ? ", plus " + hiddenRows.length + " hidden" : "") + ".", "",
+    "This is a readable copy, not a restore point. To restore, use the full backup (.json) from the Export menu. Images are not included here; each node says how many it has.", "");
+  out.push("## Eras", "");
+  const eras = eraList();
+  if (!eras.length) out.push("No eras defined yet.", "");
+  else { eras.forEach((e, i) => out.push((i + 1) + ". " + mdEsc(e.name || "ERA_TBD"))); out.push(""); }
+  const nodeMd = (r) => {
+    const d = dataOf(r), L = [];
+    L.push("### " + mdEsc(nameOf(r)), "", "- Type: " + TYPES[typeOf(r)].label);
+    if (r.hidden) L.push("- Hidden: yes");
+    if (hasTime(d)) {
+      const parts = [];
+      if (d.time.era != null) parts.push(mdEsc(eraName(d.time.era)));
+      if (Number.isFinite(d.time.order)) parts.push("order " + d.time.order);
+      L.push("- Story time: " + parts.join(", "));
+    } else L.push("- Story time: none yet (outer ring)");
+    L.push("- Last changed: " + utcStamp(new Date(r.updated_at)) + byText(r.updated_by));
+    const to = linksOf(r);
+    if (to.length) L.push("- Links to: " + to.map((l) => mdEsc(nameOf(byId.get(l.to))) + tag(byId.get(l.to)) + (l.label ? " (" + mdEsc(l.label) + ")" : "")).join("; "));
+    const from = incoming.get(r.id) || [];
+    if (from.length) L.push("- Linked from: " + from.map((x) => mdEsc(nameOf(x.from)) + tag(x.from) + (x.label ? " (" + mdEsc(x.label) + ")" : "")).join("; "));
+    const ims = Array.isArray(d.images) ? d.images : [];
+    if (ims.length) L.push("- Images: " + ims.length + " (not in this file; they are in the full backup). Captions: " + ims.map((i) => (i && i.caption ? "\"" + mdEsc(i.caption) + "\"" : "(none)")).join("; "));
+    L.push("", d.summary ? mdEsc(d.summary) : "_No summary yet._", "");
+    return L;
+  };
+  for (const k of TYPE_ORDER) {
+    const group = visible.filter((r) => typeOf(r) === k).sort(byAlpha);
+    if (!group.length) continue;
+    out.push("## " + TYPES[k].label + " (" + group.length + ")", "");
+    for (const r of group) out.push(...nodeMd(r));
+  }
+  if (hiddenRows.length) {
+    out.push("## Hidden nodes (" + hiddenRows.length + ")", "", "These are hidden from the map but nothing was erased.", "");
+    for (const r of hiddenRows.sort(byAlpha)) out.push(...nodeMd(r));
+  }
+  out.push("---", "End of copy: " + rows.length + " nodes in total.", "");
+  return out.join("\n");
+}
+function downloadFile(name, blob) {
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob); a.download = name;
+  document.body.append(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+}
+const kb = (n) => (n < 1024 * 100 ? Math.max(1, Math.round(n / 1024)) + " KB" : (n / 1048576).toFixed(1) + " MB");
+function openExport() {
+  const total = model.rows.size, hid = [...model.rows.values()].filter((r) => r.hidden).length;
+  const status = el("p", { role: "status", class: "dim" }, "");
+  openModal("Export a copy", el("div", { class: "expbody" },
+    el("p", null, "Both copies are made from what is on the site right now (" + total + " nodes" + (hid ? ", " + hid + " hidden" : "") + "). Nothing on the site is changed."),
+    el("p", null, el("strong", null, "Readable copy (.md): "), "one file you can read and search in any notes app. Every node with its text, story time, links and who changed it last. Images are listed by count and caption, not included. It cannot restore the map."),
+    el("p", null, el("strong", null, "Full backup (.json): "), "everything, including images and every automatic backup, so it grows as you add images. This is the one to restore from."),
+    status), [
+    { id: "md", label: "Download readable copy (.md)", kind: "primary", onclick: () => {
+      try {
+        const md = buildMarkdown(), blob = new Blob([md], { type: "text/markdown;charset=utf-8" });
+        downloadFile("throat-copy-" + todayStamp() + ".md", blob);
+        status.textContent = "Saved throat-copy-" + todayStamp() + ".md (" + kb(blob.size) + ", " + total + " nodes). Check your Downloads folder.";
+      } catch (e) { status.textContent = "Could not make the copy: " + e.message; }
+    } },
+    { id: "json", label: "Download full backup (.json)", onclick: async () => {
+      status.textContent = "Preparing the full backup...";
+      try {
+        const r = await fetch("/api/backups/archive", { headers: { Accept: "application/json" } });
+        if (r.status === 401) { status.textContent = "Your sign-in ended. Sign in again in a new tab, then try again."; return; }
+        if (!r.ok) { status.textContent = "The server could not make the backup (error " + r.status + "). Nothing was changed."; return; }
+        const blob = await r.blob();
+        downloadFile("throat-full-backup-" + todayStamp() + ".json", blob);
+        status.textContent = "Saved throat-full-backup-" + todayStamp() + ".json (" + kb(blob.size) + "). Check your Downloads folder.";
+      } catch (e) { status.textContent = "Could not reach the server. Nothing was changed."; }
+    } },
+    { label: "Close", kind: "quiet", onclick: closeModal },
+  ], { wide: true });
+}
+$("exportBtn").addEventListener("click", openExport);
 
 /* ---------- labels ---------- */
 const labelPool = [];

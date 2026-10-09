@@ -40,6 +40,22 @@ h1,h2,.cin{font-family:"Cinzel",Georgia,serif;font-weight:500;letter-spacing:.14
 #legend input{accent-color:#9B6FD8;margin:0}
 #legend svg{width:18px;height:18px;flex:none;filter:drop-shadow(0 0 5px currentColor)}
 #legend .n{margin-left:auto;color:var(--muted);font-size:13px}
+#legend{max-height:calc(100vh - 200px);overflow-y:auto}
+#legend .layer{display:flex;align-items:center;gap:2px}
+#legend .layer label{flex:1;min-width:0}
+#legend .exp{all:unset;cursor:pointer;flex:none;width:24px;height:24px;display:grid;place-items:center;border-radius:6px;color:var(--muted)}
+#legend .exp:hover{color:var(--text);background:rgba(185,166,214,.14)}
+#legend .exp svg{width:12px;height:12px;filter:none;transition:transform .15s}
+#legend .exp[aria-expanded=true] svg{transform:rotate(90deg)}
+body.calm #legend .exp svg{transition:none}
+#legend .lnodes{list-style:none;margin:2px 0 6px 28px;padding:0;max-height:210px;overflow:auto;border-left:1px solid rgba(185,166,214,.2)}
+#legend .lnodes button{all:unset;display:block;width:100%;box-sizing:border-box;padding:3px 8px;cursor:pointer;font-size:14px;line-height:1.3;
+  color:var(--text);border-radius:6px;overflow-wrap:anywhere}
+#legend .lnodes button:hover{background:rgba(185,166,214,.14)}
+#legend .lnodes button.sel{color:#fff;background:rgba(75,79,168,.32);box-shadow:inset 2px 0 0 var(--thistle)}
+#legend .exp:focus-visible,#legend .lnodes button:focus-visible{outline:2px solid var(--thistle);outline-offset:2px}
+.lpop button{all:unset;display:block;width:100%;box-sizing:border-box;padding:7px 4px;cursor:pointer;overflow-wrap:anywhere}
+.lpop button:hover,.lpop button:focus-visible{color:#fff;text-shadow:0 0 10px var(--thistle)}
 #detail{top:16px;right:16px;width:300px;padding:16px 18px;max-height:calc(100vh - 230px);overflow:auto}
 #detail .chip{display:inline-block;font-size:10px;padding:3px 10px;border-radius:99px;
   border:1px solid currentColor;margin-bottom:8px}
@@ -193,6 +209,9 @@ button:focus-visible,select:focus-visible,input:focus-visible,textarea:focus-vis
   #legend{width:auto;top:auto;bottom:110px;left:16px;display:flex;gap:12px;flex-wrap:nowrap;overflow-x:auto;
     max-width:calc(100vw - 32px);padding:8px 12px}
   #legend label{white-space:nowrap}
+  #legend{max-height:none}
+  #legend .lnodes{display:none!important}
+  #legend .layer{flex:none}
   #legend h2,#legend .n{display:none}
   #detail,#detail.editing{top:auto;bottom:156px;right:16px;left:16px;width:auto;max-height:26vh}
   #detail.editing{max-height:58vh}
