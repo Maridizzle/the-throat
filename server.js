@@ -349,6 +349,13 @@ function makePgStore(pool) {
 }
 
 const usingPostgres = !!process.env.DATABASE_URL;
+// On a host with a throwaway filesystem (Railway), a missing DATABASE_URL would
+// silently fall back to a local file that is wiped on every redeploy. Setting
+// REQUIRE_DATABASE=1 turns that mistake into a loud startup failure instead.
+if (!usingPostgres && ["1", "true", "yes"].includes(String(process.env.REQUIRE_DATABASE || "").toLowerCase())) {
+  console.error("REQUIRE_DATABASE is set but DATABASE_URL is missing. Refusing to start without a database.");
+  process.exit(1);
+}
 const pool = usingPostgres
   ? new Pool({
       connectionString: process.env.DATABASE_URL,
