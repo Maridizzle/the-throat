@@ -142,7 +142,11 @@ function createAi(env, deps) {
       const r = await fetchImpl(url, { method: "POST", signal: ctl.signal, headers: { "Content-Type": "application/json", Authorization: "Bearer " + p.key }, body: JSON.stringify(body) });
       const raw = await r.text();
       let j = null; try { j = JSON.parse(raw); } catch (e) { /* not JSON */ }
-      if (!r.ok) return { fail: r.status, detail: raw.slice(0, 300).split(p.key).join("[key]") };
+      if (!r.ok) {
+        const pe = j && j.error && typeof j.error === "object" ? j.error : null;
+        return { fail: r.status, detail: raw.slice(0, 300).split(p.key).join("[key]"), code: pe && typeof pe.code === "string" ? pe.code : "",
+          pmsg: pe && typeof pe.message === "string" ? pe.message.split(p.key).join("[key]").replace(/\s+/g, " ").slice(0, 200) : "" };
+      }
       if (!j) return { fail: 502, detail: "reply was not JSON" };
       if (req.provider === "groq") {
         const m = j.choices && j.choices[0] && j.choices[0].message;
@@ -159,7 +163,18 @@ function createAi(env, deps) {
   }
   const parseJson = (text) => {
     const t = text.trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "");
-    try { return JSON.parse(t); } catch (e) { return null; }
+    try { return JSON.parse(t); } catch (e) { /* fall through: look for the first complete object inside other words */ }
+    const start = t.indexOf("{");
+    if (start < 0) return null;
+    let depth = 0, inStr = false, esc = false;
+    for (let i = start; i < t.length; i++) {
+      const c = t[i];
+      if (inStr) { if (esc) esc = false; else if (c === "\\") esc = true; else if (c === '"') inStr = false; continue; }
+      if (c === '"') inStr = true;
+      else if (c === "{") depth++;
+      else if (c === "}" && --depth === 0) { try { return JSON.parse(t.slice(start, i + 1)); } catch (e) { return null; } }
+    }
+    return null;
   };
 
   // ---- routes ----
@@ -210,15 +225,26 @@ function createAi(env, deps) {
     const wait = rateCheck(who, r.provider);
     if (wait) return res.status(429).json({ error: "rate_limited", retry_after_seconds: wait });
     pending[r.provider] += r.estimate;
-    let out;
-    try { out = await upstream(r); } finally { pending[r.provider] -= r.estimate; }
+    let out, fellBack = false;
     const ev = { at: new Date(now()).toISOString(), by: who, provider: r.provider, model: r.model.id, input_tokens: 0, output_tokens: 0, cost_usd: 0, purpose: r.purpose, ok: false };
+    try {
+      out = await upstream(r);
+      // Groq can refuse strict JSON mode for a model (code json_validate_failed). Retry once in plain mode: the prompt
+      // already asks for JSON only, and the client checks every reply before using it.
+      if (r.provider === "groq" && r.json && out.fail === 400 && out.code === "json_validate_failed") {
+        console.error("ai groq: strict JSON mode failed, retrying once without it");
+        await record({ ...ev, purpose: (r.purpose + " (json mode failed)").slice(0, 80) });
+        fellBack = true;
+        out = await upstream({ ...r, json: false });
+      }
+    } finally { pending[r.provider] -= r.estimate; }
     if (out.fail) {
       await record(ev);
       console.error("ai " + r.provider + " upstream " + out.fail + ": " + out.detail);
       const status = out.fail === 429 ? 429 : out.fail === 504 ? 504 : 502;
       const msg = out.fail === 401 || out.fail === 403 ? "The provider rejected the server's key." : out.fail === 429 ? "The provider is rate limiting. Try again shortly." : out.fail === 504 ? "The provider took too long." : "The provider returned an error (" + out.fail + ").";
-      return res.status(status).json({ error: out.fail === 401 || out.fail === 403 ? "provider_auth" : "provider_error", message: msg });
+      const why = out.pmsg && out.fail !== 401 && out.fail !== 403 ? " The provider said: " + out.pmsg : "";
+      return res.status(status).json({ error: out.fail === 401 || out.fail === 403 ? "provider_auth" : "provider_error", message: msg + why });
     }
     const known = Number.isFinite(out.input) && Number.isFinite(out.output);
     ev.input_tokens = known ? out.input : r.inTok; ev.output_tokens = known ? out.output : r.maxOut;
@@ -227,7 +253,7 @@ function createAi(env, deps) {
     await record(ev);
     if (!out.text) return res.status(502).json({ error: "empty_reply", message: "The provider returned no text." });
     const json = r.json ? parseJson(out.text) : null;
-    res.json({ ok: true, provider: r.provider, model: r.model.id, text: out.text, json, json_ok: r.json ? json !== null : null,
+    res.json({ ok: true, provider: r.provider, model: r.model.id, text: out.text, json, json_ok: r.json ? json !== null : null, json_fallback: fellBack,
       usage: { input_tokens: ev.input_tokens, output_tokens: ev.output_tokens, cost_usd: ev.cost_usd },
       spent_this_month_usd: round6(spent[r.provider]), monthly_cap_usd: p.cap });
   }));
