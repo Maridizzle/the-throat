@@ -38,6 +38,8 @@ Nothing in this file invents story content. Empty slots use TBD tokens.
 | Hover names | Desktop mouse only. A node's name fades in as the pointer comes within 80 px of its edge and fades out as it leaves. Several can show at once, each fading by its own distance. Touch is unchanged. |
 | Camera | Starts looking at the flow from the front. A soft sway of about 7 degrees each way replaces the old full spin, and manual orbiting is kept. Calm mode stops it. |
 | Overview map | A wide 200 by 100 strip sized for the long flow, hidden on phones. Time runs left to right, with a faint leyline per type, era ticks, the untimed cloud, and the camera marker. A Top / Side button switches between looking down (width of the cloud) and looking from the front (weave of the streams). The choice is not remembered after a reload. Tested on throwaway data at 1280 px wide; not tested between about 1000 and 1200 px or with hundreds of nodes. |
+| AI (in progress) | A chat that parses incoming text, proposes new nodes, patches existing nodes without overwriting them, and runs four analyses (story synthesis, character synthesis and analysis, conflict analysis between selected nodes, arc analysis). Two modes: Groq (default, cheapest) and OpenAI (costs money, manual only, with a cost estimate the writer must confirm). The AI never writes by itself: every change is a proposal with a before and after view, applied through the normal conflict-safe save with a safety backup first, so History can undo it. Only selected nodes are sent, or the whole map after a prompt. A warn-only check flags likely explicit passages before sending, and the writer chooses to send, mask or skip. |
+| AI keys and caps | Keys live only in Railway variables, never in the browser or the repo. Server-side monthly caps: Groq $5, OpenAI $10 (both set by Maridizzle). Per-writer rate limits. A usage log stores counts and cost only, never prompts or replies. |
 | Calm mode | Stops drift and pulses. Follows `prefers-reduced-motion`. |
 | Quality | Low, Medium, High. |
 
@@ -60,6 +62,8 @@ Order set by Maridizzle: put it on Railway first, then writer logins, then seed 
 5. **Seeding.** Done. The 34 sections were imported on the live site (Maridizzle confirmed it worked). What remains is Maridizzle's: placing nodes in story time, adding links, and retyping any seeded node whose type was a best guess.
 6. **History screen.** Built and tested on throwaway local data. A History button opens a list of every backup, newest first (when, why, who, node count), with Back up now. Preview compares a backup with the site right now (identical, changed, created since, eras) with a per-node differences view. Restore this version restores one node: a safety backup first, then the normal conflict-safe save. Restore the whole map needs the typed word RESTORE, first saves a "Before a restore" backup (the undo point), and hides nodes made since, never erasing them. Both restores refuse while a node editor is open, and the whole-map restore refuses if the map changed while the preview was open. Tested: list, Back up now, preview counts, markup shown as text, wrong and right typed word, node restore, whole-map restore, undo through the "Before a restore" backup, phone width, no page errors. Not tested: the changed-while-reading guard, the open-editor guard, the signed-out (401) message, writers mode with real sign-ins, Postgres.
 
+7. **AI.** Stage 1 (server gateway) built and tested against local mock providers only, no real calls. Stages left: 2 chat panel with the warn-only explicit-content check, 3 safe proposals (create nodes, patch existing nodes), 4 the four analyses.
+
 ## Server API (step 1)
 
 - `GET /api/health` (open, no auth)
@@ -70,8 +74,11 @@ Order set by Maridizzle: put it on Railway first, then writer logins, then seed 
 - `GET /api/backups`, `POST /api/backups`, `GET /api/backups/archive`, `GET /api/backups/:id`, `POST /api/backups/:id/restore`
 - `POST /api/login`, `POST /api/logout`, `GET /api/me` (writers mode)
 - `GET /api/presence`, `POST /api/presence` with `{focus, editing}`
+- `GET /api/ai/status`, `GET /api/ai/usage`, `POST /api/ai/estimate`, `POST /api/ai/chat` with `{mode: groq|openai, messages, json, tier, max_output_tokens, purpose, confirm_cost}` (OpenAI needs `confirm_cost` at or above the estimate, else 412; past a cap is 402; rate limited is 429)
 
 Env vars: `APP_PASSWORD` (required in shared-password mode, emergency way in otherwise), `WRITER_1_NAME` and `WRITER_1_PASSWORD` up to `WRITER_4_*` (passwords at least 10 characters, names unique, the name `shared` is reserved), `SESSION_SECRET` (at least 24 characters, required when writers are set; changing it signs everyone out), `DATABASE_URL` (Railway Postgres; absent means local JSON file), `REQUIRE_DATABASE` (set to 1 on Railway), `BACKUP_KEEP` (optional), `MAX_IMAGES_PER_NODE`, `MAX_IMAGE_BYTES`, `MAX_NODE_BYTES`, `DATA_DIR`, `PORT`.
+
+AI variables: `GROQ_API_KEY` and `OPENAI_API_KEY` (never paste into chat or commit). Optional: `GROQ_MODEL` (default `openai/gpt-oss-20b`), `OPENAI_MODEL` (default `gpt-6-luna`), `OPENAI_MODEL_ACCURATE` (unset means the same as `OPENAI_MODEL`), `GROQ_PRICE_IN` and `GROQ_PRICE_OUT`, `OPENAI_PRICE_IN` and `OPENAI_PRICE_OUT`, `OPENAI_ACCURATE_PRICE_IN` and `OPENAI_ACCURATE_PRICE_OUT` (USD per 1M tokens, needed only for a model not in the built-in table), `AI_BUDGET_GROQ` (default 5), `AI_BUDGET_OPENAI` (default 10), `AI_RATE_GROQ` (default 40 per 10 minutes per writer), `AI_RATE_OPENAI` (default 10), `AI_MAX_INPUT_CHARS` (default 400000), `AI_MAX_OUTPUT_TOKENS` (default 8000), `AI_TIMEOUT_MS`, `GROQ_BASE_URL`, `OPENAI_BASE_URL`.
 
 The server refuses to start, with a clear message, on incomplete or weak writer settings.
 
@@ -98,7 +105,8 @@ Railway redeploys on every push to the connected branch. Autodeploys can be paus
 - Railway request-size limits are not documented in the pages checked. About 8 MB was tested locally only, not through Railway.
 - The first page load carries every node's images. Fine for dozens of images; with hundreds it would need lazy loading.
 - Not tested: touch input and pinch zoom, a real GPU, phone-width editing with images, two real browsers editing at once, three.js loading from cdnjs on a real device.
-- Model IDs in the older tools (`claude-sonnet-4-6`, `claude-opus-5`) were not verified. Irrelevant until an AI proxy is added.
+- AI, not verified: the real request and reply shapes. Groq's own docs could not be read from the build sandbox, and OpenAI's shape for the GPT-6 models was read through a summarizer. The Groq call uses the common OpenAI-compatible chat format; the OpenAI call uses the Responses API with `store: false`. The first real call should be one small test, approved by Maridizzle, costing a fraction of a cent. Also unverified: whether Groq bills in arrears (check the Billing page in the Groq console), whether `gpt-oss-20b` follows JSON mode well, Groq's data policy, and the 3 characters per token cost estimate against real use.
+- AI sources, all vendor `.com`: OpenAI models and pricing pages (developers.openai.com), the OpenAI "your data" guide (API data not used for training by default, abuse-monitoring logs kept up to 30 days), and a screenshot of Groq's production models table supplied by Maridizzle (gpt-oss-20b $0.075 in and $0.30 out per 1M, gpt-oss-120b $0.15 and $0.60, both 131,072 context; the Llama models were marked Enterprise).
 - The change counter (`seq`) is assigned when a write starts, not when it commits. Overlapping writes could be missed by a poller, so the client re-requests with a small overlap (rows carry a revision, so repeats are harmless).
 
 ## Research notes

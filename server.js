@@ -12,6 +12,7 @@ const fs = require("fs/promises");
 const { existsSync } = require("fs");
 const { Pool } = require("pg");
 const { createAuth } = require("./auth");
+const { createAi } = require("./ai");
 
 const app = express();
 const PORT = process.env.PORT || 3002;
@@ -590,6 +591,59 @@ app.post("/api/backups/:id/restore", wrap(async (req, res) => {
   res.json({ ok: true, restored_from: rec.id, state: await store.getState(0) });
 }));
 
+// ── AI gateway ────────────────────────────────────────────
+// Keys come only from Railway variables (GROQ_API_KEY, OPENAI_API_KEY). The usage log is
+// append-only and stores counts and cost, never prompts or replies. See ai.js.
+function makeAiStorage() {
+  const FILE = path.join(DATA_DIR, "ai-usage.jsonl");
+  const readAll = async () => {
+    try {
+      return (await fs.readFile(FILE, "utf8")).split("\n").filter(Boolean).map((l) => { try { return JSON.parse(l); } catch (e) { return null; } }).filter(Boolean);
+    } catch (e) {
+      if (e.code === "ENOENT") return [];
+      throw e;
+    }
+  };
+  if (!usingPostgres) {
+    return {
+      async init() { await fs.mkdir(DATA_DIR, { recursive: true }); },
+      add: (ev) => fs.appendFile(FILE, JSON.stringify(ev) + "\n", "utf8"),
+      sinceMonth: async (mk) => (await readAll()).filter((e) => String(e.at).startsWith(mk)),
+      recent: async (n) => (await readAll()).slice(-n).reverse(),
+    };
+  }
+  const out = (r) => ({ at: r.at, by: r.by_writer, provider: r.provider, model: r.model, input_tokens: r.input_tokens, output_tokens: r.output_tokens, cost_usd: Number(r.cost_usd), purpose: r.purpose, ok: r.ok });
+  return {
+    async init() {
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS throat_ai_usage (
+          id BIGSERIAL PRIMARY KEY,
+          at TIMESTAMPTZ NOT NULL DEFAULT now(),
+          by_writer TEXT,
+          provider TEXT NOT NULL,
+          model TEXT NOT NULL,
+          input_tokens INTEGER NOT NULL DEFAULT 0,
+          output_tokens INTEGER NOT NULL DEFAULT 0,
+          cost_usd NUMERIC(12,6) NOT NULL DEFAULT 0,
+          purpose TEXT,
+          ok BOOLEAN NOT NULL DEFAULT false
+        );`);
+      await pool.query("CREATE INDEX IF NOT EXISTS throat_ai_usage_at_idx ON throat_ai_usage (at DESC);");
+    },
+    add: (ev) => pool.query(
+      "INSERT INTO throat_ai_usage (at, by_writer, provider, model, input_tokens, output_tokens, cost_usd, purpose, ok) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)",
+      [ev.at, ev.by, ev.provider, ev.model, ev.input_tokens, ev.output_tokens, ev.cost_usd, ev.purpose, ev.ok]),
+    async sinceMonth(mk) {
+      const r = await pool.query("SELECT * FROM throat_ai_usage WHERE at >= $1::timestamptz AND at < ($1::timestamptz + interval '1 month')", [mk + "-01T00:00:00Z"]);
+      return r.rows.map(out);
+    },
+    async recent(n) { return (await pool.query("SELECT * FROM throat_ai_usage ORDER BY at DESC, id DESC LIMIT $1", [n])).rows.map(out); },
+  };
+}
+const aiStorage = makeAiStorage();
+const ai = createAi(process.env, { storage: aiStorage });
+app.use("/api/ai", ai.router);
+
 // Malformed JSON and oversized bodies get a JSON reply, not a stack trace.
 app.use((err, req, res, next) => {
   if (res.headersSent) return next(err);
@@ -608,6 +662,8 @@ app.get("*", (req, res) => {
 (async () => {
   try {
     await store.init();
+    await aiStorage.init();
+    console.log("AI gateway -> " + ai.summary());
     const existing = await listBackups();
     if (existing.length) {
       const t = new Date(existing[0].created_at).getTime();
