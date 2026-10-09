@@ -536,7 +536,8 @@ function showDetail() {
     el("div", { class: "f" }, "Last changed"), el("p", null, relTime(n.updated_at) + byText(n.by)),
     el("div", { class: "acts" },
       el("button", { type: "button", onclick: () => startEdit(n) }, "Edit"),
-      el("button", { type: "button", class: "quiet", onclick: () => askHide(n) }, "Hide")));
+      el("button", { type: "button", class: "quiet", onclick: () => askHide(n) }, "Hide"),
+      el("button", { type: "button", class: "quiet", onclick: () => chatAdd(n.id) }, "Add to chat")));
 }
 function setSync() {
   const p = $("sync");
@@ -557,6 +558,7 @@ function select(id) {
   refreshLinkEmphasis();
   showDetail();
   markLayerSelection();
+  chatSync();
   pingSoon();
 }
 function refreshLinkEmphasis() {
@@ -1401,6 +1403,227 @@ async function restoreWholeMap(b, snap, shownSig, rerender) {
 }
 $("historyBtn").addEventListener("click", openHistory);
 
+/* story chat (stage 2): talk about the nodes you choose. Groq by default; OpenAI only after you confirm the cost.
+ * Nothing here changes the map, and the conversation lives in this tab only. Keys never reach the browser (see ai.js). */
+const CHAT_MAX_OUT = 1500;
+const CHAT_SYSTEM = "You are a careful story analyst helping a writer with a collaborative worldbuilding map called The Throat. " +
+  "Use only the nodes shared with you and what the writer says in this conversation. Never invent story facts, names, places, rules or events. " +
+  "If something is not in the supplied text, say that it is not in the text you were given. When you quote, quote exactly. Keep answers clear and organised. " +
+  "You cannot change the map in this conversation, so never claim to have created or edited anything. If the writer asks for changes, describe what you would suggest and say they can be applied later.";
+const chat = { open: false, mode: "groq", tray: [], msgs: [], busy: false, status: null };
+const usd = (n) => "$" + (n < 0.01 ? n.toFixed(4) : n.toFixed(3));
+const wordCount = (s) => (String(s).trim().match(/\S+/g) || []).length;
+
+/* A rough local word check, run in this browser before anything is sent. It only warns: it never blocks and never edits on its own. */
+const EXPLICIT_STRONG = /\b(?:orgasm\w*|intercourse|genital\w*|penis|vagina\w*|clitoris|erection|masturbat\w*|erotic\w*|porn\w*|blowjob\w*|fellatio|cunnilingus|cumming|ejaculat\w*)\b/gi;
+const EXPLICIT_WEAK = /\b(?:naked|nude|nudity|breasts?|nipples?|moan\w*|arous\w*|undress\w*|lust\w*|thighs?|groan\w*)\b/gi;
+function scanExplicit(text) {
+  const out = [];
+  for (const s of String(text).match(/[^.!?\n]+[.!?]*/g) || []) {
+    const strong = (s.match(EXPLICIT_STRONG) || []).length, weak = (s.match(EXPLICIT_WEAK) || []).length;
+    if (strong >= 1 || weak >= 2) out.push(s.trim());
+  }
+  return out;
+}
+const maskText = (text, sents) => sents.reduce((t, s) => t.split(s).join("[passage withheld]"), String(text));
+
+function nodeBlock(n, mask) {
+  const links = (Array.isArray(n.raw.links) ? n.raw.links : []).map((l) => { const t = l && graph.byId.get(l.to); return t ? t.name + (l.label ? " (" + l.label + ")" : "") : null; }).filter(Boolean);
+  const body = mask ? maskText(n.name + "\n" + (n.summary || ""), scanExplicit(n.name + ". " + n.summary)) : n.name + "\n" + (n.summary || "");
+  const [name, ...rest] = body.split("\n");
+  return "[NODE id=" + n.id + "] " + TYPES[n.type].label + ": " + name + "\n" + (rest.join("\n").trim() || "(no summary)") +
+    (n.u != null ? "\nStory time: " + whenText(n) : "") + (links.length ? "\nLinked to: " + links.join("; ") : "");
+}
+const trayNodes = () => chat.tray.map((id) => graph.byId.get(id)).filter(Boolean);
+const nodeChars = (n) => n.name.length + (n.summary || "").length + 60;
+
+// Resolves with the id of the button pressed, or "cancel" if the dialog is dismissed.
+function choose(title, body, buttons) {
+  return new Promise((resolve) => {
+    let done = false;
+    const fin = (v) => { if (done) return; done = true; resolve(v); closeModal(); };
+    openModal(title, body, buttons.map((b) => ({ id: b.id, label: b.label, kind: b.kind, onclick: () => fin(b.id) })),
+      { wide: true, onClose: () => { if (!done) { done = true; resolve("cancel"); } } });
+  });
+}
+
+const chatLog = el("div", { class: "clog", role: "log", "aria-live": "polite" });
+const chatIn = el("textarea", { id: "chatIn", rows: "3", placeholder: "Ask about the nodes above, or paste text to talk about...", "aria-label": "Message to the story chat" });
+const chatSize = el("p", { class: "csize dim" });
+const chatStatus = el("p", { class: "cstat dim", role: "status" });
+const chatTray = el("div", { class: "ctray" });
+const chatModes = el("div", { class: "cmodes", role: "group", "aria-label": "Which AI to use" });
+const chatSendBtn = el("button", { type: "button", class: "primary", onclick: () => chatSend() }, "Send");
+const chatAddSel = el("button", { type: "button", onclick: () => chatAdd(selectedId) }, "Add selected node");
+const chatEl = el("aside", { class: "panel", id: "chat", hidden: "", "aria-label": "Story chat" },
+  el("div", { class: "chead" }, el("h2", null, "Story chat"), el("button", { type: "button", class: "cx", "aria-label": "Close the chat", onclick: () => chatToggle(false) }, "×")),
+  chatModes, chatStatus,
+  el("div", { class: "cf" }, "The AI can see"), chatTray,
+  el("div", { class: "cacts" }, chatAddSel, el("button", { type: "button", onclick: chatAddAll }, "Add whole map...")),
+  chatLog,
+  el("div", { class: "ccomp" }, chatIn, chatSize, el("div", { class: "cacts" }, chatSendBtn, el("button", { type: "button", class: "quiet", onclick: () => { chat.msgs = []; renderLog(); } }, "Clear chat"))));
+document.body.append(chatEl);
+
+function modeLabel(m) { return m === "openai" ? "OpenAI" : "Groq"; }
+function chatSync() { // called when the selection or the map changes
+  const before = chat.tray.length;
+  chat.tray = chat.tray.filter((id) => graph.byId.has(id));
+  if (before !== chat.tray.length || chat.open) renderChat();
+}
+function renderChat() {
+  const st = chat.status;
+  chatModes.replaceChildren(...["groq", "openai"].map((m) => {
+    const p = st && st[m], on = !st || p.configured;
+    return el("button", { type: "button", class: "cm" + (chat.mode === m ? " sel" : "") + (on ? "" : " off"), "aria-pressed": chat.mode === m ? "true" : "false",
+      title: on ? "" : "Not set up on the server: " + (p ? p.reason : ""), onclick: () => { chat.mode = m; renderChat(); } }, modeLabel(m) + (m === "openai" ? " (costs money)" : " (cheapest)"));
+  }));
+  if (!st) chatStatus.textContent = "Checking the AI settings...";
+  else {
+    const p = st[chat.mode];
+    chatStatus.textContent = p.configured
+      ? modeLabel(chat.mode) + " is on, model " + (p.model) + ". This month: " + usd(p.spent_this_month_usd) + " of " + usd(p.monthly_cap_usd) + "."
+      : modeLabel(chat.mode) + " is not set up on the server yet: " + p.reason + ". In Railway, add " + (chat.mode === "openai" ? "OPENAI_API_KEY" : "GROQ_API_KEY") + ".";
+  }
+  chatTray.replaceChildren(...(trayNodes().length ? trayNodes().map((n) => el("span", { class: "tchip", style: "color:" + TYPES[n.type].hex },
+    el("span", { class: "tn" }, n.name), el("button", { type: "button", "aria-label": "Remove " + n.name + " from the chat", onclick: () => { chat.tray = chat.tray.filter((x) => x !== n.id); renderChat(); } }, "×")))
+    : [el("span", { class: "dim" }, "Nothing yet. Select a node and add it, or just type.")]));
+  const sel = selectedId && graph.byId.get(selectedId);
+  chatAddSel.disabled = !sel || chat.tray.includes(selectedId);
+  chatAddSel.textContent = sel ? (chat.tray.includes(selectedId) ? "Selected node is added" : "Add “" + sel.name.slice(0, 22) + (sel.name.length > 22 ? "..." : "") + "”") : "Add selected node";
+  updateSize();
+  chatSendBtn.disabled = chat.busy || !chatIn.value.trim();
+}
+function updateSize() {
+  const ns = trayNodes(), chars = ns.reduce((a, n) => a + nodeChars(n), 0) + chatIn.value.length + CHAT_SYSTEM.length;
+  const words = ns.reduce((a, n) => a + wordCount(n.name + " " + n.summary), 0) + wordCount(chatIn.value);
+  chatSize.textContent = "Will send: " + ns.length + " node" + (ns.length === 1 ? "" : "s") + " and your message, about " + words + " words (up to about " + Math.ceil(chars / 3) + " tokens, an estimate).";
+}
+function renderLog() {
+  chatLog.replaceChildren(...chat.msgs.map((m, i) => {
+    const box = el("div", { class: "cmsg " + m.role }, el("div", { class: "who" }, m.role === "user" ? "You" : m.role === "error" ? "Problem" : modeLabel(m.mode) + (m.cost != null ? ", " + usd(m.cost) : "")),
+      el("div", { class: "txt" }, m.content));
+    if (m.role === "assistant" && m.mode === "groq" && m.payload) {
+      box.append(el("button", { type: "button", class: "retry", onclick: () => chatRetryOpenAI(i) }, "Not good enough? Retry with OpenAI (costs money, asks first)"));
+    }
+    return box;
+  }));
+  if (chat.busy) chatLog.append(el("div", { class: "cmsg thinking" }, el("div", { class: "txt" }, "Thinking...")));
+  chatLog.scrollTop = chatLog.scrollHeight;
+}
+async function refreshAiStatus() {
+  const r = await apiRead("/api/ai/status");
+  chat.status = r.status === 200 ? r.json : null;
+  if (r.status !== 200) chatStatus.textContent = r.status === 401 ? "Your sign-in ended. Sign in again in a new tab." : "Could not reach the AI settings.";
+  else renderChat();
+}
+function chatToggle(open) {
+  chat.open = open;
+  chatEl.hidden = !open;
+  document.body.classList.toggle("chat-open", open);
+  if (open) { renderChat(); renderLog(); refreshAiStatus(); chatIn.focus(); }
+}
+function chatAdd(id) {
+  const n = id && graph.byId.get(id);
+  if (!n) return;
+  if (!chat.tray.includes(id)) chat.tray.push(id);
+  if (!chat.open) chatToggle(true); else renderChat();
+}
+async function chatAddAll() {
+  const ns = graph.nodes.filter((n) => !chat.tray.includes(n.id));
+  if (!ns.length) { toast("Every node is already added, or the map is empty."); return; }
+  const chars = ns.reduce((a, n) => a + nodeChars(n), 0), words = ns.reduce((a, n) => a + wordCount(n.name + " " + n.summary), 0);
+  const limit = chat.status ? chat.status.max_input_chars : 400000;
+  if (chars + CHAT_SYSTEM.length > limit * 0.9) {
+    await choose("Too large for one request", el("div", null, el("p", null, "The whole map is about " + words + " words (about " + chars + " characters). One request can carry at most " + limit + " characters, so add fewer nodes at a time.")), [{ id: "ok", label: "Close" }]);
+    return;
+  }
+  const c = await choose("Add the whole map?", el("div", null,
+    el("p", null, "This adds all " + ns.length + " nodes, about " + words + " words (up to about " + Math.ceil(chars / 3) + " tokens). Every one of them is sent with each message until you remove them."),
+    el("p", { class: "dim" }, "On OpenAI that costs more. You will see the worst-case cost before anything is sent.")),
+    [{ id: "add", label: "Add all " + ns.length + " nodes", kind: "primary" }, { id: "cancel", label: "Cancel", kind: "quiet" }]);
+  if (c !== "add") return;
+  for (const n of ns) chat.tray.push(n.id);
+  renderChat();
+}
+function aiError(r, what) {
+  const j = r.json || {};
+  if (r.status === 0) return "Could not reach the server. Nothing was sent.";
+  if (r.status === 401) return "Your sign-in ended. Sign in again in a new tab, then try again.";
+  if (r.status === 402) return "That would pass this month's " + what + " spending cap (" + usd(j.spent_this_month_usd || 0) + " spent of " + usd(j.monthly_cap_usd || 0) + "). Nothing was sent.";
+  if (r.status === 413) return (j.message || "That is too much text for one request.") + " Remove some nodes from the list above or shorten your message.";
+  if (r.status === 429) return j.retry_after_seconds ? "You have sent a lot of messages. Try again in about " + Math.ceil(j.retry_after_seconds / 60) + " minute(s)." : "The AI service is rate limiting. Try again shortly.";
+  if (r.status === 503) return j.message || "That AI is not set up on the server yet.";
+  return j.message || "The AI service returned an error (" + r.status + "). Nothing was changed.";
+}
+// Runs one request. For OpenAI it asks for the cost first. Returns true when a reply was added.
+async function chatRun(mode, messages) {
+  chat.busy = true; renderChat(); renderLog();
+  try {
+    let confirm = null;
+    if (mode === "openai") {
+      const e = await apiWrite("POST", "/api/ai/estimate", { mode, messages, max_output_tokens: CHAT_MAX_OUT, purpose: "chat" });
+      if (e.status !== 200) { chat.msgs.push({ role: "error", content: aiError(e, "OpenAI") }); return false; }
+      const j = e.json;
+      const c = await choose("Use OpenAI?", el("div", null,
+        el("p", null, "OpenAI costs money. The worst case for this one message is " + usd(j.worst_case_usd) + ", and it is usually less."),
+        el("p", null, "This month so far: " + usd(j.spent_this_month_usd) + " of " + usd(j.monthly_cap_usd) + ". Model: " + j.model + "."),
+        el("p", { class: "dim" }, "The estimate counts 3 characters per token and the full reply allowance.")),
+        [{ id: "go", label: "Send with OpenAI for up to " + usd(j.worst_case_usd), kind: "primary" }, { id: "cancel", label: "Cancel", kind: "quiet" }]);
+      if (c !== "go") return false;
+      confirm = j.worst_case_usd;
+    }
+    const r = await apiWrite("POST", "/api/ai/chat", { mode, messages, max_output_tokens: CHAT_MAX_OUT, purpose: "chat", confirm_cost: confirm });
+    if (r.status !== 200) { chat.msgs.push({ role: "error", content: aiError(r, modeLabel(mode)) }); return false; }
+    chat.msgs.push({ role: "assistant", content: r.json.text, mode, cost: r.json.usage.cost_usd, payload: messages });
+    return true;
+  } finally {
+    chat.busy = false; renderLog(); refreshAiStatus();
+  }
+}
+async function chatSend() {
+  if (chat.busy) return;
+  const text = chatIn.value.trim();
+  if (!text) return;
+  if (chat.status && !chat.status[chat.mode].configured) { toast(modeLabel(chat.mode) + " is not set up on the server yet.", true); return; }
+  let nodes = trayNodes(), mask = false, msgText = text;
+  const hits = [];
+  for (const n of nodes) { const h = scanExplicit(n.name + ". " + n.summary); if (h.length) hits.push({ label: n.name, node: n, sents: h }); }
+  const mh = scanExplicit(text);
+  if (mh.length) hits.push({ label: "your message", node: null, sents: mh });
+  if (hits.length) {
+    const list = el("ul", { class: "chits" }, ...hits.map((h) => el("li", null, el("strong", null, h.label + ": "), "“" + h.sents[0].slice(0, 140) + (h.sents[0].length > 140 ? "..." : "") + "”" + (h.sents.length > 1 ? " and " + (h.sents.length - 1) + " more" : ""))));
+    const buttons = [{ id: "send", label: "Send anyway", kind: "primary" }, { id: "mask", label: "Mask those passages" }];
+    if (hits.some((h) => h.node)) buttons.push({ id: "leave", label: "Leave those nodes out" });
+    buttons.push({ id: "cancel", label: "Cancel", kind: "quiet" });
+    const c = await choose("Possible explicit passages", el("div", null,
+      el("p", null, "A rough word check in your browser found passages that may be explicit. Whatever you send goes to " + modeLabel(chat.mode) + ", a third party. You decide:"), list,
+      el("p", { class: "dim" }, "This check is crude. It can miss things and flag innocent text. Nothing has been sent or changed.")), buttons);
+    if (c === "cancel") return;
+    if (c === "mask") { mask = true; msgText = maskText(text, mh); }
+    if (c === "leave") nodes = nodes.filter((n) => !hits.some((h) => h.node === n));
+  }
+  const blocks = nodes.map((n) => nodeBlock(n, mask));
+  const system = CHAT_SYSTEM + (blocks.length ? "\n\nThe writer has shared these nodes:\n\n" + blocks.join("\n\n") : "\n\nNo nodes are shared in this conversation.");
+  const hist = chat.msgs.filter((m) => m.role === "user" || m.role === "assistant").slice(-12).map((m) => ({ role: m.role, content: m.sent || m.content }));
+  const messages = [{ role: "system", content: system }, ...hist, { role: "user", content: msgText }];
+  chat.msgs.push({ role: "user", content: text, sent: msgText });
+  chatIn.value = "";
+  const added = await chatRun(chat.mode, messages);
+  if (!added && chat.msgs[chat.msgs.length - 1].role !== "error") { chat.msgs.pop(); chatIn.value = text; } // cancelled before sending: put the message back
+  renderLog(); renderChat();
+}
+async function chatRetryOpenAI(i) {
+  if (chat.busy) return;
+  const m = chat.msgs[i];
+  if (!m || !m.payload) return;
+  await chatRun("openai", m.payload);
+  renderLog(); renderChat();
+}
+chatIn.addEventListener("input", () => { updateSize(); chatSendBtn.disabled = chat.busy || !chatIn.value.trim(); });
+chatIn.addEventListener("keydown", (e) => { if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); chatSend(); } });
+$("chatBtn").addEventListener("click", () => chatToggle(!chat.open));
+
+
 /* ---------- labels ---------- */
 const labelPool = [], NEAR_PX = 80;
 function labelAt(i) {
@@ -1732,6 +1955,7 @@ function refreshAll(first) {
   selectedId = keep && graph.byId.has(keep) ? keep : null;
   refreshLinkEmphasis();
   showDetail();
+  chatSync();
   HOME.dist = graph.homeDist;
   scene.fog.density = Math.min(0.00042, 0.00042 * 1100 / graph.homeDist); // keep the far end of a long flow visible
   if (first) { cam.dist = HOME.dist; goal.copy(centroid()); target.copy(goal); }
