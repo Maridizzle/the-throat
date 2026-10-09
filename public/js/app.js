@@ -438,9 +438,12 @@ function whenText(n) {
 }
 function showDetail() {
   const d = $("detail"), n = selectedId && graph.byId.get(selectedId);
+  if (editing) { updateEditWarn(); return; } // never wipe a form that is being edited
+  d.classList.remove("editing");
   if (!n) {
     d.replaceChildren(el("h2", null, graph.nodes.length ? "Nothing selected" : "Empty map"),
-      el("p", { class: "dim" }, graph.nodes.length ? "Click a node to fly to it." : "Nodes will appear here as you and your co-writer add them."));
+      el("p", { class: "dim" }, graph.nodes.length ? "Click a node to fly to it." : "No nodes yet. Create the first one."),
+      el("div", { class: "acts" }, el("button", { type: "button", onclick: () => startEdit(null) }, "New node")));
     return;
   }
   const t = TYPES[n.type], nb = graph.nbrs.get(n.id) || [];
@@ -455,7 +458,10 @@ function showDetail() {
     n.u == null ? el("p", { class: "dim" }, "No story time yet (outer ring)") : el("p", null, whenText(n)),
     el("div", { class: "f" }, "Connected to (" + nb.length + ")"),
     nb.length ? list : el("p", { class: "dim" }, "No links yet."),
-    el("div", { class: "f" }, "Last changed"), el("p", null, relTime(n.updated_at)));
+    el("div", { class: "f" }, "Last changed"), el("p", null, relTime(n.updated_at)),
+    el("div", { class: "acts" },
+      el("button", { type: "button", onclick: () => startEdit(n) }, "Edit"),
+      el("button", { type: "button", class: "quiet", onclick: () => askHide(n) }, "Hide")));
 }
 function setSync() {
   const p = $("sync");
@@ -464,7 +470,12 @@ function setSync() {
 }
 
 /* ---------- selection and camera ---------- */
+let editing = null; // { id, isNew, baseRev, base } while the node editor is open
 function select(id) {
+  if (editing && id !== editing.id) {
+    if (!confirmDiscard()) return;
+    editing = null;
+  }
   selectedId = id && graph.byId.has(id) ? id : null;
   const n = selectedId && graph.byId.get(selectedId);
   if (n) goal.set(n.x, n.y, n.z);
@@ -505,6 +516,353 @@ const calmBox = $("calm"), mq = matchMedia("(prefers-reduced-motion: reduce)");
 function setCalm(v) { calm = v; calmBox.checked = v; applyBodyClass(); }
 calmBox.addEventListener("change", (e) => setCalm(e.target.checked));
 $("reset").addEventListener("click", () => { Object.assign(cam, HOME); select(null); goal.copy(centroid()); });
+
+/* ---------- editing: write API, modal, node editor, conflicts, hide, eras ---------- */
+const LIM = { name: 200, summary: 20000, label: 200, era: 120 };
+const uid = (p) => p + Math.random().toString(36).slice(2, 8) + Date.now().toString(36).slice(-4);
+const deepCopy = (v) => JSON.parse(JSON.stringify(v));
+
+async function apiWrite(method, url, body) {
+  try {
+    const r = await fetch(url, { method, headers: { "Content-Type": "application/json", Accept: "application/json" }, body: JSON.stringify(body || {}) });
+    let json = null;
+    try { json = await r.json(); } catch (e) { /* no body */ }
+    return { status: r.status, json };
+  } catch (e) {
+    return { status: 0, json: null };
+  }
+}
+let toastTimer = 0;
+function toast(msg, bad) {
+  const t = $("toast");
+  t.textContent = msg; t.className = "show" + (bad ? " bad" : "");
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { t.className = ""; }, 6000);
+}
+function writeFailure(r) {
+  if (r.status === 401) toast("Your sign-in expired. Reload and sign in again. Your edits are still in the form.", true);
+  else if (r.status === 400 && r.json && r.json.message) toast("The server refused that: " + r.json.message, true);
+  else toast("Could not save. Your edits are still in the form.", true);
+}
+
+/* modal */
+let modalEl = null, modalOnClose = null;
+function closeModal() {
+  if (!modalEl) return;
+  modalEl.remove(); modalEl = null;
+  const f = modalOnClose; modalOnClose = null;
+  if (f) f();
+}
+function openModal(title, body, buttons, opts) {
+  closeModal();
+  const bar = el("div", { class: "bar" }), btns = {};
+  for (const b of buttons) {
+    const x = el("button", { type: "button", class: b.kind || "", onclick: b.onclick }, b.label);
+    bar.append(x); btns[b.id || b.label] = x;
+  }
+  const box = el("div", { class: "box" + (opts && opts.wide ? " wide" : ""), role: "dialog", "aria-modal": "true", "aria-label": title }, el("h2", null, title), body, bar);
+  modalEl = el("div", { class: "modal" }, box);
+  modalOnClose = (opts && opts.onClose) || null;
+  modalEl.addEventListener("pointerdown", (e) => { if (e.target === modalEl && !(opts && opts.sticky)) closeModal(); });
+  document.body.append(modalEl);
+  const first = box.querySelector("input,select,textarea") || box.querySelector(".bar button");
+  if (first) first.focus();
+  return { box, btns };
+}
+addEventListener("keydown", (e) => {
+  if (e.key !== "Escape") return;
+  if (modalEl) closeModal(); else if (editing) cancelEdit();
+});
+
+/* field helpers shared by the editor and the conflict dialog */
+const FIELDS = ["type", "name", "summary", "time", "links"];
+const FIELD_LABEL = { type: "Type", name: "Name", summary: "Summary", time: "Story time", links: "Links from this node" };
+const eraList = () => {
+  const em = model.meta.get("eras");
+  return em && em.data && Array.isArray(em.data.eras) ? em.data.eras.filter((e) => e && e.id != null) : [];
+};
+const eraName = (id) => { const e = eraList().find((x) => String(x.id) === String(id)); return e ? String(e.name || "ERA_TBD") : "ERA_TBD"; };
+function fieldsOf(d) {
+  return {
+    type: String(d.type || ""),
+    name: String(d.name || ""),
+    summary: String(d.summary || ""),
+    time: hasTime(d) ? JSON.stringify({ era: d.time.era == null ? null : String(d.time.era), order: Number.isFinite(d.time.order) ? d.time.order : null }) : "",
+    links: JSON.stringify((Array.isArray(d.links) ? d.links : []).filter((l) => l && l.to).map((l) => [String(l.to), String(l.label || "")]).sort()),
+  };
+}
+function setField(target, f, src) {
+  if (f === "time") { if (hasTime(src)) target.time = deepCopy(src.time); else delete target.time; }
+  else if (f === "links") target.links = deepCopy(Array.isArray(src.links) ? src.links : []);
+  else if (src[f] === undefined) delete target[f];
+  else target[f] = src[f];
+}
+function nodeNameById(id) {
+  const n = graph.byId.get(id);
+  if (n) return n.name;
+  const r = model.rows.get(id);
+  return r && r.data && r.data.name ? r.data.name + " (hidden)" : id;
+}
+function fieldDisplay(f, d) {
+  if (f === "type") return el("span", null, d.type ? (TYPES[d.type] ? TYPES[d.type].label : String(d.type)) : "(none)");
+  if (f === "name") return el("span", null, d.name ? String(d.name) : "(empty)");
+  if (f === "summary") return el("span", { class: "pre" }, d.summary ? String(d.summary) : "(empty)");
+  if (f === "time") {
+    if (!hasTime(d)) return el("span", { class: "dim" }, "No story time");
+    const parts = [];
+    if (d.time.era != null) parts.push(eraName(d.time.era));
+    if (Number.isFinite(d.time.order)) parts.push("order " + d.time.order);
+    return el("span", null, parts.join(", "));
+  }
+  const ls = (Array.isArray(d.links) ? d.links : []).filter((l) => l && l.to);
+  if (!ls.length) return el("span", { class: "dim" }, "(none)");
+  const ul = el("ul");
+  for (const l of ls) ul.append(el("li", null, nodeNameById(String(l.to)), l.label ? " (" + l.label + ")" : ""));
+  return ul;
+}
+
+/* node editor */
+const confirmDiscard = () => !editingDirty() || confirm("Discard your unsaved changes to this node?");
+function startEdit(n) {
+  if (editing && !confirmDiscard()) return;
+  const row = n && model.rows.get(n.id);
+  editing = { id: n ? n.id : uid("n_"), isNew: !n, baseRev: row ? row.rev : null, base: row ? deepCopy(row.data || {}) : {} };
+  if (!n) { selectedId = null; refreshLinkEmphasis(); }
+  renderEditor();
+}
+function cancelEdit() {
+  if (!editing || !confirmDiscard()) return;
+  editing = null;
+  showDetail();
+}
+function renderEditor() {
+  const d = $("detail"), base = editing.base;
+  d.classList.add("editing");
+  const typeSel = el("select", { id: "f-type" }, el("option", { value: "" }, "Choose a type..."));
+  const types = ["character", "place", "rule", "thread", "question"];
+  if (base.type && !types.includes(base.type)) types.push(base.type);
+  for (const k of types) typeSel.append(el("option", { value: k }, TYPES[k] ? TYPES[k].label : String(k)));
+  typeSel.value = base.type || "";
+  const nameIn = el("input", { id: "f-name", type: "text", maxlength: LIM.name }); nameIn.value = base.name || "";
+  const sumIn = el("textarea", { id: "f-summary", rows: 5, maxlength: LIM.summary }); sumIn.value = base.summary || "";
+  const eraSel = el("select", { id: "f-era" }, el("option", { value: "" }, "No era"));
+  const known = new Set();
+  for (const e of eraList()) { known.add(String(e.id)); eraSel.append(el("option", { value: String(e.id) }, String(e.name || "ERA_TBD"))); }
+  if (base.time && base.time.era != null && !known.has(String(base.time.era))) eraSel.append(el("option", { value: String(base.time.era) }, "ERA_TBD (not in the era list)"));
+  eraSel.value = base.time && base.time.era != null ? String(base.time.era) : "";
+  const ordIn = el("input", { id: "f-order", type: "number", step: "any", placeholder: "optional" });
+  ordIn.value = base.time && Number.isFinite(base.time.order) ? base.time.order : "";
+  const linksBox = el("div", { id: "f-links" });
+  const targets = graph.nodes.filter((x) => x.id !== editing.id).sort((a, b) => a.name.localeCompare(b.name));
+  const addLinkRow = (to, label) => {
+    const sel = el("select", { "aria-label": "Link target" }, el("option", { value: "" }, "Choose a node..."));
+    for (const t of targets) sel.append(el("option", { value: t.id }, t.name));
+    if (to && !graph.byId.has(to)) sel.append(el("option", { value: to }, nodeNameById(to)));
+    sel.value = to || "";
+    const lab = el("input", { type: "text", placeholder: "label (optional)", maxlength: LIM.label, "aria-label": "Link label" }); lab.value = label || "";
+    const row = el("div", { class: "lrow" }, sel, lab,
+      el("button", { type: "button", class: "quiet", "aria-label": "Remove this link row", onclick: () => row.remove() }, "Remove"));
+    linksBox.append(row);
+  };
+  for (const l of Array.isArray(base.links) ? base.links : []) if (l && l.to) addLinkRow(String(l.to), String(l.label || ""));
+  const fld = (label, ctl, hint) => el("div", { class: "fld" }, el("label", { for: ctl.id }, label), ctl, hint ? el("small", null, hint) : null);
+  d.replaceChildren(
+    el("h2", null, editing.isNew ? "New node" : "Edit node"),
+    el("p", { id: "f-warn", class: "warn", hidden: "" }, ""),
+    fld("Type", typeSel), fld("Name", nameIn), fld("Summary", sumIn),
+    el("div", { class: "f" }, "Story time"),
+    el("div", { class: "two" }, fld("Era", eraSel), fld("Order", ordIn)),
+    el("small", { class: "hint" }, "Leave both empty to place it on the outer ring. Order sorts nodes within an era."),
+    el("div", { class: "f" }, "Links from this node"),
+    linksBox,
+    el("button", { type: "button", class: "quiet", onclick: () => addLinkRow("", "") }, "Add a link"),
+    el("small", { class: "hint" }, "Links from other nodes are edited on those nodes."),
+    el("div", { class: "acts" },
+      el("button", { type: "button", id: "f-save", onclick: saveEdit }, "Save"),
+      el("button", { type: "button", class: "quiet", onclick: cancelEdit }, "Cancel")));
+  updateEditWarn();
+  d.scrollTop = 0;
+  (editing.isNew ? typeSel : nameIn).focus();
+}
+function collectForm(strict) {
+  const data = deepCopy(editing.base);
+  const type = $("f-type").value, name = $("f-name").value.trim();
+  if (strict && !type) { toast("Choose a type.", true); return null; }
+  if (strict && !name) { toast("Give it a name.", true); return null; }
+  data.type = type; data.name = name; data.summary = $("f-summary").value;
+  const era = $("f-era").value, ordRaw = $("f-order").value.trim(), order = ordRaw === "" ? null : Number(ordRaw);
+  if (strict && ordRaw !== "" && !Number.isFinite(order)) { toast("Order must be a number.", true); return null; }
+  const hasOrder = order !== null && Number.isFinite(order);
+  if (era !== "" || hasOrder) { data.time = {}; if (era !== "") data.time.era = era; if (hasOrder) data.time.order = order; }
+  else delete data.time;
+  const links = [], seen = new Set();
+  for (const row of $("f-links").children) {
+    const to = row.querySelector("select").value, label = row.querySelector("input").value.trim();
+    if (!to || to === editing.id || seen.has(to + "|" + label)) continue;
+    seen.add(to + "|" + label); links.push(label ? { to, label } : { to });
+  }
+  data.links = links;
+  return data;
+}
+function editingDirty() {
+  if (!editing || !$("f-type")) return false;
+  const now = fieldsOf(collectForm(false)), was = fieldsOf(editing.base);
+  return FIELDS.some((f) => now[f] !== was[f]);
+}
+function updateEditWarn() {
+  const w = $("f-warn");
+  if (!editing || !w) return;
+  const row = !editing.isNew && model.rows.get(editing.id);
+  if (row && row.rev > editing.baseRev) { w.hidden = false; w.textContent = "Someone else saved this node since you started. If you save, you will be asked how to combine both versions."; }
+  else w.hidden = true;
+}
+function setBusy(b) { const s = $("f-save"); if (s) s.disabled = b; }
+
+async function saveEdit() {
+  const data = collectForm(true);
+  if (!data) return;
+  await attemptSave(editing, data, editing.baseRev);
+}
+async function attemptSave(ed, data, baseRev) {
+  setBusy(true);
+  const r = await apiWrite("PUT", "/api/nodes/" + ed.id, ed.isNew ? { data } : { data, base_rev: baseRev });
+  setBusy(false);
+  if (r.status === 200 && r.json && r.json.node) {
+    model.rows.set(r.json.node.id, r.json.node);
+    editing = null;
+    refreshAll(false);
+    select(r.json.node.id);
+    toast("Saved.");
+  } else if (r.status === 409 && r.json && r.json.current) {
+    if (ed.isNew) { ed.id = uid("n_"); attemptSave(ed, data, null); return; }
+    showConflict(ed, data, r.json.current);
+  } else if (r.status === 404) toast("That node no longer exists on the server. Copy your text out, then reload.", true);
+  else writeFailure(r);
+}
+
+/* side-by-side conflict dialog */
+function showConflict(ed, mine, current) {
+  const b = fieldsOf(ed.base), m = fieldsOf(mine), t = fieldsOf(current.data || {});
+  const diff = FIELDS.filter((f) => m[f] !== t[f]);
+  const choice = {};
+  for (const f of diff) { if (m[f] === b[f]) choice[f] = "theirs"; else if (t[f] === b[f]) choice[f] = "mine"; }
+  const real = diff.filter((f) => m[f] !== b[f] && t[f] !== b[f]);
+  const body = el("div");
+  body.append(el("p", { class: "dim" },
+    "Someone saved this node while you were editing. " + (real.length ? real.length + " field(s) were changed by both of you, so you must choose. " : "You changed different fields, so both sets of changes can be kept. ") +
+    "Nothing is saved until you press Apply."));
+  if (current.hidden) body.append(el("p", { class: "warn" }, "This node is currently hidden. Saving keeps it hidden."));
+  const grid = el("div", { class: "cgrid" });
+  grid.append(el("div", { class: "ch" }, "Field"), el("div", { class: "ch" }, "Yours"), el("div", { class: "ch" }, "Theirs (latest)"));
+  const cells = {};
+  const refresh = () => {
+    ui.btns.apply.disabled = !diff.every((f) => choice[f]);
+    for (const f of diff) for (const c of cells[f]) c.classList.toggle("need", !choice[f]);
+  };
+  for (const f of FIELDS) {
+    grid.append(el("div", { class: "cl" }, FIELD_LABEL[f]));
+    if (m[f] === t[f]) {
+      grid.append(el("div", { class: "cc same" }, fieldDisplay(f, mine), el("small", null, "Same in both")), el("div", { class: "cc same" }, fieldDisplay(f, current.data || {})));
+      continue;
+    }
+    const mk = (who, data) => {
+      const rb = el("input", { type: "radio", name: "c-" + f, "aria-label": FIELD_LABEL[f] + ": keep " + who });
+      rb.checked = choice[f] === who;
+      rb.addEventListener("change", () => { choice[f] = who; refresh(); });
+      const hint = who === "mine" && m[f] !== b[f] && t[f] === b[f] ? "Only you changed this" : who === "theirs" && t[f] !== b[f] && m[f] === b[f] ? "Only they changed this" : "";
+      return el("label", { class: "cc pick" }, rb, el("div", null, fieldDisplay(f, data), hint ? el("small", null, hint) : null));
+    };
+    const cm = mk("mine", mine), ct = mk("theirs", current.data || {});
+    cells[f] = [cm, ct];
+    grid.append(cm, ct);
+  }
+  body.append(grid);
+  const setAll = (who) => { for (const f of diff) { choice[f] = who; for (const rb of grid.querySelectorAll('input[name="c-' + f + '"]')) rb.checked = (rb.getAttribute("aria-label").endsWith("keep " + who)); } refresh(); };
+  const ui = openModal("Two versions of this node", body, [
+    { id: "apply", label: "Apply and save", kind: "primary", onclick: async () => {
+      const result = deepCopy(current.data || {});
+      let usesMine = false;
+      for (const f of diff) if (choice[f] === "mine") { setField(result, f, mine); usesMine = true; }
+      closeModal();
+      if (!usesMine) {
+        model.rows.set(current.id, current); editing = null; refreshAll(false); select(current.id); toast("Kept the latest version. Your edits were not saved.");
+        return;
+      }
+      ed.base = deepCopy(current.data || {}); ed.baseRev = current.rev;
+      await attemptSave(ed, result, current.rev);
+    } },
+    { id: "mine", label: "All mine", kind: "quiet", onclick: () => setAll("mine") },
+    { id: "theirs", label: "All theirs", kind: "quiet", onclick: () => setAll("theirs") },
+    { id: "back", label: "Back to editing", kind: "quiet", onclick: closeModal },
+  ], { wide: true, sticky: true });
+  refresh();
+}
+
+/* hide and unhide: the only forms of removal, always reversible */
+function askHide(n) {
+  const row = model.rows.get(n.id);
+  openModal("Hide this node?", el("p", null, "\"" + n.name + "\" will disappear from the map. Nothing is erased: you can unhide it from the Hidden list, and links to it come back with it."), [
+    { label: "Hide it", kind: "primary", onclick: async () => {
+      closeModal();
+      const r = await apiWrite("POST", "/api/nodes/" + n.id + "/hide", { base_rev: row.rev });
+      if (r.status === 200 && r.json && r.json.node) { model.rows.set(n.id, r.json.node); select(null); refreshAll(false); toast("Hidden. Find it under Hidden to unhide."); }
+      else if (r.status === 409 && r.json && r.json.current) { model.rows.set(n.id, r.json.current); refreshAll(false); toast("Someone changed this node first. Review it, then try again.", true); }
+      else writeFailure(r);
+    } },
+    { label: "Cancel", kind: "quiet", onclick: closeModal },
+  ]);
+}
+function openHiddenList() {
+  const rows = [...model.rows.values()].filter((r) => r.hidden).sort((a, b) => String((a.data || {}).name || a.id).localeCompare(String((b.data || {}).name || b.id)));
+  const ul = el("ul", { class: "hl" });
+  if (!rows.length) ul.append(el("li", { class: "dim" }, "Nothing is hidden."));
+  for (const r of rows) {
+    ul.append(el("li", null, el("span", null, String((r.data || {}).name || r.id)),
+      el("button", { type: "button", onclick: async () => {
+        const res = await apiWrite("POST", "/api/nodes/" + r.id + "/unhide", { base_rev: r.rev });
+        if (res.status === 200 && res.json && res.json.node) { model.rows.set(r.id, res.json.node); refreshAll(false); toast("Unhidden."); openHiddenList(); }
+        else if (res.status === 409 && res.json && res.json.current) { model.rows.set(r.id, res.json.current); refreshAll(false); toast("Someone changed this node first. Try again.", true); openHiddenList(); }
+        else writeFailure(res);
+      } }, "Unhide")));
+  }
+  openModal("Hidden nodes", ul, [{ label: "Close", kind: "quiet", onclick: closeModal }]);
+}
+
+/* eras: add, rename and reorder. They cannot be deleted here. */
+function openErasEditor() {
+  const meta = model.meta.get("eras");
+  let list = eraList().map((e) => ({ id: String(e.id), name: String(e.name || "") }));
+  const box = el("div");
+  const draw = () => {
+    box.replaceChildren(el("p", { class: "dim" }, "Eras run from the bottom of the helix to the top, in this order. They can be renamed and reordered, not deleted."));
+    list.forEach((e, i) => {
+      const inp = el("input", { type: "text", maxlength: LIM.era, placeholder: "Era name", "aria-label": "Era " + (i + 1) + " name" }); inp.value = e.name;
+      inp.addEventListener("input", () => { e.name = inp.value; });
+      const mv = (dir) => () => { const j = i + dir; if (j < 0 || j >= list.length) return; [list[i], list[j]] = [list[j], list[i]]; draw(); };
+      const up = el("button", { type: "button", class: "quiet", "aria-label": "Move era up", onclick: mv(-1) }, "Up");
+      const dn = el("button", { type: "button", class: "quiet", "aria-label": "Move era down", onclick: mv(1) }, "Down");
+      up.disabled = i === 0; dn.disabled = i === list.length - 1;
+      box.append(el("div", { class: "lrow era" }, el("span", { class: "n" }, String(i + 1)), inp, up, dn));
+    });
+    if (!list.length) box.append(el("p", { class: "dim" }, "No eras yet."));
+    box.append(el("button", { type: "button", class: "quiet", onclick: () => { list.push({ id: uid("era_"), name: "" }); draw(); const ins = box.querySelectorAll("input"); ins[ins.length - 1].focus(); } }, "Add an era"));
+  };
+  draw();
+  openModal("Eras", box, [
+    { label: "Save eras", kind: "primary", onclick: async () => {
+      const clean = list.map((e) => ({ id: e.id, name: e.name.trim() }));
+      if (clean.some((e) => !e.name)) { toast("Every era needs a name.", true); return; }
+      const r = await apiWrite("PUT", "/api/meta/eras", meta ? { data: { eras: clean }, base_rev: meta.rev } : { data: { eras: clean } });
+      if (r.status === 200 && r.json && r.json.meta) { model.meta.set("eras", r.json.meta); closeModal(); refreshAll(false); toast("Eras saved."); }
+      else if (r.status === 409 && r.json && r.json.current) { model.meta.set("eras", r.json.current); closeModal(); refreshAll(false); toast("Someone changed the eras first. Reloaded the latest, please redo your change.", true); }
+      else writeFailure(r);
+    } },
+    { label: "Cancel", kind: "quiet", onclick: closeModal },
+  ], { wide: true });
+}
+$("newNode").addEventListener("click", () => startEdit(null));
+$("erasBtn").addEventListener("click", openErasEditor);
+$("hiddenBtn").addEventListener("click", openHiddenList);
 
 /* ---------- labels ---------- */
 const labelPool = [];
@@ -725,7 +1083,10 @@ function refreshAll(first) {
   showDetail();
   HOME.dist = graph.homeDist;
   if (first) { cam.dist = HOME.dist; goal.copy(centroid()); target.copy(goal); }
-  if (!graph.nodes.length) showState("Empty map", "No nodes yet. They will appear here as you and your co-writer add them.", false); else hideState();
+  const nHidden = [...model.rows.values()].filter((r) => r.hidden).length;
+  $("hiddenBtn").style.display = nHidden ? "" : "none";
+  $("hiddenBtn").textContent = "Hidden (" + nHidden + ")";
+  hideState();
 }
 async function poll(first) {
   try {
