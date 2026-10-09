@@ -1448,6 +1448,16 @@ function choose(title, body, buttons) {
   });
 }
 
+const ANALYSES = {
+  story: { label: "Story synthesis", focus: "the whole story",
+    ask: "Write a story synthesis. Use these sections: Premise, World and rules, Threads and tensions, Gaps and open questions." },
+  characters: { label: "Character analysis", focus: "the characters",
+    ask: "Write a character synthesis and analysis. Give each character their own section with these findings where the text supports them: Role, What they want (as stated), Relationships (use the links and the text), Contradictions, Gaps in what is known. End with a section called How they connect." },
+  conflict: { label: "Conflict analysis", focus: "the conflicts between the shared nodes",
+    ask: "Analyse the conflicts between the shared nodes. Use these sections: Where they collide, What is at stake, What is unresolved, What the text does not say." },
+  arc: { label: "Arc analysis", focus: "the arc of the story",
+    ask: "Analyse the story's arc. The nodes with story time are listed in story order, then the nodes without. Use these sections: Setup, Rising tensions, Turning points the text states, Ticking clocks, Gaps in the sequence, Material without story time." },
+};
 const chatLog = el("div", { class: "clog", role: "log", "aria-live": "polite" });
 const chatIn = el("textarea", { id: "chatIn", rows: "3", placeholder: "Ask about the nodes above, or paste text to talk about...", "aria-label": "Message to the story chat" });
 const chatSize = el("p", { class: "csize dim" });
@@ -1463,6 +1473,7 @@ const chatEl = el("aside", { class: "panel", id: "chat", hidden: "", "aria-label
   el("div", { class: "cf" }, "The AI can see"), chatTray,
   el("div", { class: "cacts" }, chatAddSel, el("button", { type: "button", onclick: chatAddAll }, "Add whole map...")),
   chatLog,
+  el("div", { class: "can" }, el("span", { class: "cf" }, "Analyze"), ...Object.keys(ANALYSES).map((k) => el("button", { type: "button", title: ANALYSES[k].label, onclick: () => chatAnalyze(k) }, { story: "Story", characters: "Characters", conflict: "Conflict", arc: "Arc" }[k]))),
   el("div", { class: "ccomp" }, chatIn, chatSize, el("div", { class: "cacts" }, chatSendBtn, chatProposeBtn, el("button", { type: "button", class: "quiet", onclick: () => { chat.msgs = []; renderLog(); } }, "Clear chat")),
     el("p", { class: "dim chint" }, "Propose changes turns your text into suggestions you review. Nothing changes until you tick it and press Apply. Edits to existing nodes are more accurate on OpenAI, which asks first.")));
 document.body.append(chatEl);
@@ -1506,8 +1517,9 @@ function renderLog() {
   chatLog.replaceChildren(...chat.msgs.map((m, i) => {
     const box = el("div", { class: "cmsg " + m.role }, el("div", { class: "who" }, m.role === "user" ? "You" : m.role === "error" ? "Problem" : modeLabel(m.mode) + (m.cost != null ? ", " + usd(m.cost) : "")),
       el("div", { class: "txt" }, m.content));
+    if (m.report) box.append(el("button", { type: "button", class: "retry", onclick: () => openReport(m.report.rep, m.report.ctx, m.report.mode, m.report.model) }, "Open the report"));
     if (m.set && m.set.items.length) box.append(el("button", { type: "button", class: "retry", onclick: () => openReview(m.set) }, "Open the proposals"));
-    if (m.role === "assistant" && m.mode === "groq" && (m.payload || m.proposeCtx)) {
+    if (m.role === "assistant" && m.mode === "groq" && (m.payload || m.proposeCtx || m.rerun)) {
       box.append(el("button", { type: "button", class: "retry", onclick: () => chatRetryOpenAI(i) }, "Not good enough? Retry with OpenAI (costs money, asks first)"));
     }
     return box;
@@ -1629,6 +1641,7 @@ async function chatSend() {
 async function chatRetryOpenAI(i) {
   if (chat.busy) return;
   const m = chat.msgs[i];
+  if (m && m.rerun) { await m.rerun("openai"); return; }
   if (m && m.proposeCtx) { await chatPropose(m.proposeCtx, "openai"); return; }
   if (!m || !m.payload) return;
   await chatRun("openai", m.payload);
@@ -1825,6 +1838,141 @@ async function chatPropose(retryCtx, retryMode) {
     content: set.bad || (set.items.length ? set.items.length + " proposal" + (set.items.length === 1 ? "" : "s") + " ready to review, " + set.items.filter((x) => !x.grounded).length + " not found in your text. Nothing has been changed." : "Nothing in your text could be proposed. Nothing has been changed.") });
   renderLog(); renderChat();
   if (set.items.length) openReview(set);
+}
+
+/* analyses (stage 4): four read-only reports about the nodes you choose. Each finding is labeled Stated, Inference or
+ * Not in the text, names its nodes, and quotes the text. Quotes are checked here. Nothing here changes the map. */
+const ANALYZE_SYSTEM = "You are a careful story analyst for a writer's collaborative worldbuilding map. Reply with ONLY a JSON object and no other text: " +
+  "{\"title\":\"...\",\"sections\":[{\"heading\":\"...\",\"findings\":[{\"label\":\"stated|inference|not_in_text\",\"text\":\"...\",\"nodes\":[\"node name\"],\"quote\":\"...\"}]}],\"open_questions\":[\"...\"]}. " +
+  "Labels: \"stated\" means the text says it directly, and needs an exact quote. \"inference\" means you reasoned it from the text, and the quote is the evidence. \"not_in_text\" means a gap, something the text does not say, and the quote may be empty. " +
+  "Every quote must be copied exactly, word for word, from a shared node or from the writer's focus note. Use only the shared nodes. Never invent facts, names, places, rules or events, and never supply missing lore. " +
+  "Phrase suggestions as questions in open_questions, because the writer decides the story. At most 8 sections and 8 findings per section. ";
+const LABELS = { stated: "Stated in the text", inference: "Inference", not_in_text: "Not in the text" };
+
+function readAnalysis(reply, ctx) {
+  const o = reply && reply.json && typeof reply.json === "object" ? reply.json : null;
+  if (!o || !Array.isArray(o.sections)) return { bad: "The AI's answer was not in the expected format, so there is no report." };
+  const str = (v, n) => (typeof v === "string" ? v.slice(0, n).trim() : "");
+  const sections = [];
+  let flagged = 0, total = 0;
+  for (const s of o.sections.slice(0, 10)) {
+    if (!s || typeof s !== "object") continue;
+    const findings = [];
+    for (const f of (Array.isArray(s.findings) ? s.findings : []).slice(0, 12)) {
+      if (!f || typeof f !== "object") continue;
+      const text = str(f.text, 2000);
+      if (!text) continue;
+      const label = LABELS[f.label] ? f.label : "inference", quote = str(f.quote, 600), nq = normQ(quote);
+      const grounded = label === "not_in_text" ? true : nq.length >= 12 && ctx.sourceNorm.includes(nq);
+      const nodes = (Array.isArray(f.nodes) ? f.nodes : []).filter((x) => typeof x === "string").map((x) => x.slice(0, 200)).slice(0, 8);
+      findings.push({ label, text, nodes, quote, grounded }); total++; if (!grounded) flagged++;
+    }
+    if (findings.length) sections.push({ heading: str(s.heading, 200) || "Findings", findings });
+  }
+  const questions = (Array.isArray(o.open_questions) ? o.open_questions : []).filter((x) => typeof x === "string" && x.trim()).map((x) => x.trim().slice(0, 500)).slice(0, 12);
+  if (!sections.length && !questions.length) return { bad: "The AI's answer had no usable findings, so there is no report." };
+  return { title: str(o.title, 200) || ctx.kind.label, sections, questions, flagged, total };
+}
+
+function reportMarkdown(rep, ctx, mode, model) {
+  const L = [];
+  L.push("# " + rep.title, "", "Kind: " + ctx.kind.label, "Made: " + new Date().toISOString().slice(0, 10), "Made by: " + modeLabel(mode) + (model ? " (" + model + ")" : ""),
+    "Nodes included (" + ctx.nodeNames.length + "): " + ctx.nodeNames.join("; "), ctx.focusNote ? "Focus note: " + ctx.focusNote : "", "",
+    "This report was written by an AI from the nodes above. It is not canon. Check every finding against your own text. Findings marked with a warning have a quote that was not found in the text that was sent.", "");
+  for (const s of rep.sections) {
+    L.push("## " + s.heading, "");
+    for (const f of s.findings) {
+      L.push("- [" + LABELS[f.label] + "] " + f.text + (f.nodes.length ? " (Nodes: " + f.nodes.join(", ") + ")" : "") + (f.grounded ? "" : " (WARNING: the quote was not found in the text)"));
+      if (f.quote) L.push("  > " + f.quote.replace(/\n+/g, " "));
+    }
+    L.push("");
+  }
+  if (rep.questions.length) { L.push("## Questions for the writer", ""); for (const q of rep.questions) L.push("- " + q); L.push(""); }
+  return L.filter((x, i, a) => !(x === "" && a[i - 1] === "")).join("\n");
+}
+
+function openReport(rep, ctx, mode, model) {
+  const body = el("div", { class: "prev" });
+  body.append(el("p", { class: "dim" }, "Written by " + modeLabel(mode) + " from " + ctx.nodeNames.length + " node" + (ctx.nodeNames.length === 1 ? "" : "s") + ". It is not canon and it has changed nothing. " +
+    (rep.flagged ? rep.flagged + " of " + rep.total + " findings have a quote that was not found in your text, shown in red." : "Every quote was found in your text.")));
+  for (const s of rep.sections) {
+    body.append(el("h3", null, s.heading));
+    for (const f of s.findings) {
+      body.append(el("div", { class: "pcard rf " + f.label + (f.grounded ? "" : " ungrounded") },
+        el("div", { class: "ph" }, el("span", { class: "pk lab-" + f.label }, LABELS[f.label]), f.nodes.length ? el("span", { class: "pt" }, f.nodes.join(", ")) : null),
+        el("div", { class: "rtext" }, f.text),
+        !f.grounded ? el("p", { class: "warn" }, f.quote ? "The quote was not found in your text. Treat this finding with care." : "No quote was given for this finding. Treat it with care.") : null,
+        f.quote ? el("blockquote", null, f.quote) : null));
+    }
+  }
+  if (rep.questions.length) { body.append(el("h3", null, "Questions for you")); body.append(el("ul", null, ...rep.questions.map((q) => el("li", null, q)))); }
+  openModal(rep.title, body, [
+    { id: "dl", label: "Download as .md", kind: "primary", onclick: () => downloadFile("throat-analysis-" + ctx.kindKey + "-" + todayStamp() + ".md", new Blob([reportMarkdown(rep, ctx, mode, model)], { type: "text/markdown" })) },
+    { id: "close", label: "Close", kind: "quiet", onclick: closeModal },
+  ], { wide: true });
+}
+
+async function chatAnalyze(kindKey, retryCtx, retryMode) {
+  if (chat.busy) return;
+  let ctx = retryCtx, mode = retryMode || chat.mode;
+  if (!ctx) {
+    const kind = ANALYSES[kindKey], focus = chatIn.value.trim();
+    if (chat.status && !chat.status[chat.mode].configured) { toast(modeLabel(chat.mode) + " is not set up on the server yet.", true); return; }
+    let nodes = trayNodes(), ask = "";
+    if (kindKey === "conflict" && nodes.length < 2) { toast("Conflict analysis needs at least two nodes. Add them to the list above first.", true); return; }
+    if (kindKey === "characters" && !nodes.some((n) => n.type === "character")) {
+      const all = graph.nodes.filter((n) => n.type === "character");
+      if (!all.length) { toast("There are no character nodes to analyse yet.", true); return; }
+      nodes = [...nodes, ...all]; ask = "all the character nodes in the map";
+    } else if (!nodes.length && (kindKey === "story" || kindKey === "arc")) { nodes = graph.nodes.slice(); ask = "the whole map"; }
+    if (!nodes.length) { toast("The map is empty.", true); return; }
+    const chars = nodes.reduce((a, n) => a + nodeChars(n), 0) + ANALYZE_SYSTEM.length + focus.length + 1200, words = nodes.reduce((a, n) => a + wordCount(n.name + " " + n.summary), 0);
+    const limit = chat.status ? chat.status.max_input_chars : 400000;
+    if (chars > limit * 0.9) {
+      await choose("Too large for one request", el("div", null, el("p", null, "That is " + nodes.length + " nodes, about " + words + " words (about " + chars + " characters). One request can carry at most " + limit + " characters. Add fewer nodes to the list above and try again.")), [{ id: "ok", label: "Close" }]);
+      return;
+    }
+    if (ask) {
+      const c = await choose("Analyse " + ask + "?", el("div", null, el("p", null, kind.label + " will send " + nodes.length + " node" + (nodes.length === 1 ? "" : "s") + ", about " + words + " words (up to about " + Math.ceil(chars / 3) + " tokens)."),
+        el("p", { class: "dim" }, "Your list above is empty or has no characters, so this uses " + ask + ". On OpenAI you would see the worst-case cost before anything is sent.")),
+        [{ id: "go", label: "Analyse " + ask, kind: "primary" }, { id: "cancel", label: "Cancel", kind: "quiet" }]);
+      if (c !== "go") return;
+    }
+    if (kindKey === "arc") {
+      const timed = nodes.filter((n) => n.u != null).length;
+      if (timed < 3) {
+        const c = await choose("Few nodes have story time", el("div", null, el("p", null, "Only " + timed + " of these " + nodes.length + " nodes have a place in story time, so the arc analysis will say little about order. Continue anyway?")),
+          [{ id: "go", label: "Continue anyway", kind: "primary" }, { id: "cancel", label: "Cancel", kind: "quiet" }]);
+        if (c !== "go") return;
+      }
+    }
+    const scr = await screenForSend(focus, nodes);
+    if (!scr) return;
+    const used = scr.nodes;
+    if (!used.length) { toast("Every node was left out, so there is nothing to analyse.", true); return; }
+    let blocks;
+    if (kindKey === "arc") {
+      const timed = used.filter((n) => n.u != null).sort((a, b) => a.beat - b.beat), rest = used.filter((n) => n.u == null);
+      blocks = "Nodes in story order:\n\n" + (timed.length ? timed.map((n, i) => "(Position " + (i + 1) + ") " + nodeBlock(n, scr.mask)).join("\n\n") : "(none)") +
+        "\n\nNodes without story time:\n\n" + (rest.length ? rest.map((n) => nodeBlock(n, scr.mask)).join("\n\n") : "(none)");
+    } else blocks = "Shared nodes:\n\n" + used.map((n) => nodeBlock(n, scr.mask)).join("\n\n");
+    const system = ANALYZE_SYSTEM + kind.ask + "\n\n" + blocks;
+    ctx = { kindKey, kind, nodeNames: used.map((n) => n.name), focusNote: scr.msgText,
+      sourceNorm: normQ(scr.msgText + "\n" + used.map((n) => n.name + "\n" + n.summary).join("\n")),
+      messages: [{ role: "system", content: system }, { role: "user", content: scr.msgText ? "Focus note from the writer: " + scr.msgText : "No focus note. Analyse " + kind.focus + "." }] };
+    chat.msgs.push({ role: "user", content: "(" + kind.label + ") " + (focus || "no focus note"), sent: scr.msgText });
+    chatIn.value = "";
+  }
+  const reply = await chatRun(mode, ctx.messages, { raw: true, json: true, tier: "accurate", maxOut: PROPOSE_MAX_OUT, purpose: "analyze " + ctx.kindKey });
+  if (!reply) {
+    if (!retryCtx && chat.msgs[chat.msgs.length - 1].role !== "error") { chat.msgs.pop(); chatIn.value = ctx.focusNote; }
+    renderLog(); renderChat(); return;
+  }
+  const rep = readAnalysis(reply, ctx);
+  chat.msgs.push({ role: "assistant", mode, cost: reply.usage.cost_usd, rerun: (m2) => chatAnalyze(ctx.kindKey, ctx, m2), report: rep.bad ? null : { rep, ctx, mode, model: reply.model },
+    content: rep.bad || ctx.kind.label + " ready: " + rep.total + " findings, " + rep.flagged + " with a quote not found in your text. Nothing has been changed." });
+  renderLog(); renderChat();
+  if (!rep.bad) openReport(rep, ctx, mode, reply.model);
 }
 chatIn.addEventListener("input", () => { updateSize(); chatSendBtn.disabled = chat.busy || !chatIn.value.trim(); chatProposeBtn.disabled = chatSendBtn.disabled; });
 chatIn.addEventListener("keydown", (e) => { if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); chatSend(); } });

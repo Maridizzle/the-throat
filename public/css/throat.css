@@ -305,3 +305,14 @@ body.chat-open #detail,body.chat-open #mini{display:none}
 .pcard .padd{margin-top:6px;padding:6px 8px;border-radius:8px;background:rgba(90,170,120,.14);border:1px solid rgba(120,200,150,.35);overflow-wrap:anywhere;white-space:pre-wrap}
 .pcard .padd::before{content:"+ ";color:#9FE0B4}
 .pcard .padd.note::before{content:none}
+
+/* analyses */
+#chat .can{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+#chat .can button{font:inherit;font-size:13px;color:var(--text);background:rgba(11,7,20,.7);border:1px solid rgba(185,166,214,.3);border-radius:8px;padding:4px 10px;cursor:pointer}
+#chat .can button:hover{border-color:var(--thistle);box-shadow:0 0 12px rgba(185,166,214,.35)}
+.prev h3{margin:16px 0 4px;font-size:13px;letter-spacing:.14em;text-transform:uppercase;color:var(--thistle)}
+.pcard.rf .rtext{margin-top:6px;overflow-wrap:anywhere;white-space:pre-wrap}
+.pcard.rf .pk.lab-stated{color:#9FE0B4}
+.pcard.rf .pk.lab-inference{color:#E6CF8E}
+.pcard.rf .pk.lab-not_in_text{color:#B9A6D6}
+.pcard.rf blockquote{margin-top:6px}
