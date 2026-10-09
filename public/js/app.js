@@ -2,9 +2,12 @@
  * Signed Maridizzle
  *
  * Sections: constants, model and API, layout (temporary), scene, UI, loop.
- * Node record (data field): { type, name, summary, links:[{to, label}] }.
- * Links live on the source node. User text is only ever inserted with
- * textContent, never innerHTML.
+ * Node record (data field): { type, name, summary, links:[{to, label}],
+ *   time:{era, order} }. Links live on the source node. A node with a `time`
+ * sits on the story-time helix: grouped by era (order of the shared "eras"
+ * setting, { eras:[{id, name}] }), then by `order`, evenly spaced. A node
+ * with no `time` sits on the drifting outer ring. User text is only ever
+ * inserted with textContent, never innerHTML.
  */
 (() => {
 "use strict";
@@ -29,7 +32,7 @@ const PLUM = [26, 15, 38], WHITE = [255, 255, 255];
 const POLL_MS = 8000, POLL_OVERLAP = 8;
 
 /* ---------- model and API ---------- */
-const model = { rows: new Map(), seq: 0 };
+const model = { rows: new Map(), meta: new Map(), seq: 0 };
 let lastSync = 0, online = true;
 
 async function fetchState(sinceSeq) {
@@ -51,12 +54,20 @@ function applyState(s) {
       changed = true;
     }
   }
+  for (const row of s.meta || []) {
+    const cur = model.meta.get(row.key);
+    if (!cur || row.rev > cur.rev) {
+      model.meta.set(row.key, row);
+      changed = true;
+    }
+  }
   model.seq = Math.max(model.seq, s.seq || 0);
   return changed;
 }
 
 /* ---------- graph derived from rows ---------- */
-let graph = { nodes: [], byId: new Map(), links: [], nbrs: new Map() };
+let graph = { nodes: [], byId: new Map(), links: [], nbrs: new Map(),
+  lay: { U: 0, bands: [], timed: [], ringNodes: [], hasHelix: false }, homeDist: 780 };
 const hash = (str) => {
   let h = 2166136261;
   for (let i = 0; i < str.length; i++) h = Math.imul(h ^ str.charCodeAt(i), 16777619);
@@ -68,14 +79,56 @@ const rng = (seed) => () => {
   t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
   return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
 };
-// TEMPORARY layout: clusters by type. Slice 2b replaces this with the story-time helix.
-const CENTERS = {
-  character: [-230, 30, -20], place: [210, -70, 50], rule: [-10, 170, -190],
-  thread: [-70, -180, 170], question: [80, 40, 270], other: [0, 0, 0],
-};
-function layoutFor(id, type) {
-  const r = rng(hash(id)), g = () => (r() + r() + r() - 1.5) * 2, c = CENTERS[type];
-  return { x: c[0] + g() * 85, y: c[1] + g() * 85, z: c[2] + g() * 85 };
+/* Story-time helix. Timed nodes sit on the helix in order, evenly spaced, with a
+ * small extra gap between eras. Untimed nodes live on an outer ring. */
+const HX = { R: 150, ANG: 0.6, DY: 20, GAP: 0.9, RING_R: 430 };
+const yOfU = (u, U) => (u - U / 2) * HX.DY;
+function helixPoint(u, U, out) {
+  const a = u * HX.ANG;
+  return out.set(HX.R * Math.cos(a), yOfU(u, U), HX.R * Math.sin(a));
+}
+const hasTime = (d) => !!d.time && typeof d.time === "object" && (d.time.era != null || Number.isFinite(d.time.order));
+function layoutNodes(nodes) {
+  const em = model.meta.get("eras");
+  const eraList = em && em.data && Array.isArray(em.data.eras) ? em.data.eras.filter((e) => e && e.id != null) : [];
+  const eraIdx = new Map(eraList.map((e, i) => [String(e.id), i]));
+  const timed = [], ringNodes = [];
+  for (const n of nodes) {
+    if (n.fixed) continue;
+    (hasTime(n.raw) ? timed : ringNodes).push(n);
+  }
+  const eraKey = (n) => (n.raw.time.era == null ? "" : String(n.raw.time.era));
+  const rankOf = (k) => (k === "" ? -1 : eraIdx.has(k) ? eraIdx.get(k) : 1e6);
+  const ord = (n) => (Number.isFinite(n.raw.time.order) ? n.raw.time.order : 1e9);
+  timed.sort((a, b) => rankOf(eraKey(a)) - rankOf(eraKey(b)) || eraKey(a).localeCompare(eraKey(b)) ||
+    ord(a) - ord(b) || a.name.localeCompare(b.name) || a.id.localeCompare(b.id));
+  const bands = [];
+  let u = 0, prev = null;
+  timed.forEach((n, i) => {
+    const k = eraKey(n);
+    if (prev !== null && k !== prev) u += HX.GAP;
+    let b = bands[bands.length - 1];
+    if (!b || b.key !== k) {
+      const known = eraIdx.has(k);
+      b = { key: k, name: k === "" ? "" : known ? String(eraList[eraIdx.get(k)].name || "ERA_TBD") : "ERA_TBD", u0: u, u1: u, count: 0 };
+      bands.push(b);
+    }
+    n.u = u; n.beat = i + 1; n.band = bands.length - 1; b.u1 = u; b.count++;
+    prev = k; u += 1;
+  });
+  const U = timed.length ? timed[timed.length - 1].u : 0;
+  const v = new THREE.Vector3();
+  for (const n of timed) { helixPoint(n.u, U, v); n.x = v.x; n.y = v.y; n.z = v.z; }
+  ringNodes.sort((a, b) => a.id.localeCompare(b.id));
+  ringNodes.forEach((n, i) => {
+    n.ring = {
+      a0: (i / ringNodes.length) * TAU + ((hash(n.id) % 100) / 100 - .5) * .25,
+      r: HX.RING_R * (.92 + ((hash(n.id + "r") % 100) / 100) * .16),
+      y: ((hash(n.id + "y") % 1000) / 1000 - .5) * 240,
+    };
+    n.x = Math.cos(n.ring.a0) * n.ring.r; n.z = Math.sin(n.ring.a0) * n.ring.r; n.y = n.ring.y;
+  });
+  return { U, bands, timed, ringNodes, hasHelix: timed.length > 0 };
 }
 function rebuildGraph() {
   const nodes = [], byId = new Map();
@@ -83,9 +136,10 @@ function rebuildGraph() {
     if (row.hidden) continue;
     const d = row.data || {};
     const type = TYPES[d.type] ? d.type : "other";
-    const p = d.pos && isFinite(d.pos.x) && isFinite(d.pos.y) && isFinite(d.pos.z) ? d.pos : layoutFor(row.id, type);
+    const fixed = !!(d.pos && isFinite(d.pos.x) && isFinite(d.pos.y) && isFinite(d.pos.z));
     const n = { id: row.id, type, name: String(d.name || row.id), summary: String(d.summary || ""),
-      x: p.x, y: p.y, z: p.z, deg: 0, updated_at: row.updated_at, raw: d };
+      x: fixed ? d.pos.x : 0, y: fixed ? d.pos.y : 0, z: fixed ? d.pos.z : 0, fixed, u: null, beat: 0, band: -1, ring: null,
+      deg: 0, updated_at: row.updated_at, raw: d };
     nodes.push(n);
     byId.set(n.id, n);
   }
@@ -104,7 +158,12 @@ function rebuildGraph() {
       nbrs.get(to.id).push({ node: n, label });
     }
   }
-  graph = { nodes, byId, links, nbrs };
+  const lay = layoutNodes(nodes);
+  for (const l of links) l.moving = !!(l.a.ring || l.b.ring);
+  let extY = 150, extXZ = 200;
+  for (const n of nodes) { extY = Math.max(extY, Math.abs(n.y)); extXZ = Math.max(extXZ, Math.hypot(n.x, n.z)); }
+  const homeDist = Math.min(2200, Math.max(560, extY * 2.4, extXZ * 2.0));
+  graph = { nodes, byId, links, nbrs, lay, homeDist };
 }
 
 /* ---------- three.js scene ---------- */
@@ -214,33 +273,85 @@ let objs = [], linkObjs = [];
 const hidden = new Set();
 let selectedId = null, hoverId = null;
 const pulses = [];
+let decorObjs = [], ringAngle = 0;
+const UP = new THREE.Vector3(0, 1, 0), tmpP = new THREE.Vector3(), tmpQ = new THREE.Vector3();
 function clearGroup() {
   for (const o of objs) { o.sprite.material.dispose(); if (o.glow) o.glow.material.dispose(); }
   for (const l of linkObjs) { l.line.geometry.dispose(); l.line.material.dispose(); }
+  for (const d of decorObjs) { d.geometry.dispose(); d.material.dispose(); }
   for (const p of pulses) p.material.dispose();
   pulses.length = 0;
   while (group.children.length) group.remove(group.children[0]);
-  objs = []; linkObjs = [];
+  objs = []; linkObjs = []; decorObjs = [];
+}
+// Recompute one link's curve and line from its endpoints' current positions.
+function updateLinkGeom(lo) {
+  const l = lo.link, c = lo.curve;
+  c.v0.set(l.a.x, l.a.y, l.a.z); c.v2.set(l.b.x, l.b.y, l.b.z);
+  c.v1.copy(c.v0).add(c.v2).multiplyScalar(.5);
+  tmpP.subVectors(c.v2, c.v0).cross(UP);
+  if (tmpP.lengthSq() < 1e-6) tmpP.set(1, 0, 0);
+  tmpP.normalize().multiplyScalar(c.v0.distanceTo(c.v2) * l.bend);
+  c.v1.add(tmpP);
+  const pos = lo.line.geometry.attributes.position, n = pos.count;
+  for (let i = 0; i < n; i++) { c.getPoint(i / (n - 1), tmpQ); pos.setXYZ(i, tmpQ.x, tmpQ.y, tmpQ.z); }
+  pos.needsUpdate = true;
+}
+// Ring nodes drift slowly around the helix. Moves sprites and the links attached to them.
+function placeRing() {
+  for (const o of objs) {
+    const r = o.n.ring; if (!r) continue;
+    const a = r.a0 + ringAngle;
+    o.n.x = Math.cos(a) * r.r; o.n.z = Math.sin(a) * r.r;
+    o.n.y = r.y + (calm ? 0 : Math.sin(time * .4 + o.ph) * 6);
+    o.sprite.position.set(o.n.x, o.n.y, o.n.z);
+    if (o.glow) o.glow.position.copy(o.sprite.position);
+  }
+  for (const lo of linkObjs) if (lo.link.moving) updateLinkGeom(lo);
+}
+function buildDecor() {
+  const lay = graph.lay;
+  if (!lay.hasHelix) return;
+  const pts = [];
+  for (let u = -.8; u <= lay.U + .8 + 1e-6; u += .25) pts.push(helixPoint(u, lay.U, new THREE.Vector3()));
+  const curve = new THREE.CatmullRomCurve3(pts);
+  const tube = (radius, opacity) => {
+    const m = new THREE.Mesh(new THREE.TubeGeometry(curve, pts.length * 2, radius, 6, false),
+      new THREE.MeshBasicMaterial({ color: 0xB9A6D6, transparent: true, opacity, blending: THREE.AdditiveBlending, depthWrite: false }));
+    m.renderOrder = 0; group.add(m); decorObjs.push(m);
+  };
+  tube(1.3, .55);
+  if (quality >= 1) tube(5, .09);
+  if (!lay.bands.some((b) => b.key !== "")) return;
+  const edges = lay.bands.map((b, i) => b.u0 - (i === 0 ? .5 : HX.GAP / 2));
+  edges.push(lay.bands[lay.bands.length - 1].u1 + .5);
+  for (const eu of edges) {
+    const ring = [];
+    for (let i = 0; i < 96; i++) { const a = i / 96 * TAU; ring.push(new THREE.Vector3(Math.cos(a) * (HX.R + 46), yOfU(eu, lay.U), Math.sin(a) * (HX.R + 46))); }
+    const m = new THREE.LineLoop(new THREE.BufferGeometry().setFromPoints(ring),
+      new THREE.LineBasicMaterial({ color: 0x6D72D6, transparent: true, opacity: .4, blending: THREE.AdditiveBlending, depthWrite: false }));
+    m.renderOrder = 0; group.add(m); decorObjs.push(m);
+  }
 }
 const radiusOf = (n) => 16 + Math.min(n.deg, 7) * 2.2;
 function buildScene() {
   clearGroup();
   const byId = new Map();
+  buildDecor();
+  const SEG = 29;
   for (const l of graph.links) {
-    const A = new THREE.Vector3(l.a.x, l.a.y, l.a.z), B = new THREE.Vector3(l.b.x, l.b.y, l.b.z);
-    const mid = A.clone().add(B).multiplyScalar(.5);
-    const perp = new THREE.Vector3().subVectors(B, A).cross(new THREE.Vector3(0, 1, 0));
-    if (perp.lengthSq() < 1e-6) perp.set(1, 0, 0);
-    perp.normalize().multiplyScalar(A.distanceTo(B) * l.bend);
-    const curve = new THREE.QuadraticBezierCurve3(A, mid.add(perp), B);
-    const pts = curve.getPoints(28), col = new Float32Array(pts.length * 3);
-    const ca = TYPES[l.a.type].rgb, cb = TYPES[l.b.type].rgb;
-    pts.forEach((_, i) => { const t = i / (pts.length - 1); col[i * 3] = (ca[0] + (cb[0] - ca[0]) * t) / 255; col[i * 3 + 1] = (ca[1] + (cb[1] - ca[1]) * t) / 255; col[i * 3 + 2] = (ca[2] + (cb[2] - ca[2]) * t) / 255; });
-    const geo = new THREE.BufferGeometry().setFromPoints(pts); geo.setAttribute("color", new THREE.BufferAttribute(col, 3));
+    const curve = new THREE.QuadraticBezierCurve3(new THREE.Vector3(), new THREE.Vector3(), new THREE.Vector3());
+    const col = new Float32Array(SEG * 3), ca = TYPES[l.a.type].rgb, cb = TYPES[l.b.type].rgb;
+    for (let i = 0; i < SEG; i++) { const t = i / (SEG - 1); for (let k = 0; k < 3; k++) col[i * 3 + k] = (ca[k] + (cb[k] - ca[k]) * t) / 255; }
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute("position", new THREE.BufferAttribute(new Float32Array(SEG * 3), 3));
+    geo.setAttribute("color", new THREE.BufferAttribute(col, 3));
     const line = new THREE.Line(geo, new THREE.LineBasicMaterial({ vertexColors: true, transparent: true, opacity: .3,
       blending: THREE.AdditiveBlending, depthWrite: false }));
-    line.renderOrder = 0; group.add(line);
-    linkObjs.push({ link: l, line, curve, op: .3 });
+    line.renderOrder = 0; line.frustumCulled = false; group.add(line);
+    const lo = { link: l, line, curve, op: .3 };
+    updateLinkGeom(lo);
+    linkObjs.push(lo);
   }
   for (const n of graph.nodes) {
     const t = TYPES[n.type], R = radiusOf(n);
@@ -265,6 +376,7 @@ function buildScene() {
     }
   }
   selRing.visible = false; group.add(selRing);
+  placeRing();
   applyVisibility();
 }
 const selRing = new THREE.Sprite(new THREE.SpriteMaterial({ map: selRingTex, color: 0xE9DEF7, transparent: true,
@@ -320,6 +432,10 @@ function relTime(iso) {
   if (s < 86400) return Math.floor(s / 3600) + " h ago";
   return Math.floor(s / 86400) + " d ago";
 }
+function whenText(n) {
+  const b = graph.lay.bands[n.band];
+  return (b && b.name ? b.name + ", " : "") + "beat " + n.beat + " of " + graph.lay.timed.length;
+}
 function showDetail() {
   const d = $("detail"), n = selectedId && graph.byId.get(selectedId);
   if (!n) {
@@ -335,6 +451,8 @@ function showDetail() {
     el("h2", null, n.name),
     el("div", { class: "f" }, "Summary"),
     n.summary ? el("p", null, n.summary) : el("p", { class: "dim" }, "No summary yet."),
+    el("div", { class: "f" }, "Story time"),
+    n.u == null ? el("p", { class: "dim" }, "No story time yet (outer ring)") : el("p", null, whenText(n)),
     el("div", { class: "f" }, "Connected to (" + nb.length + ")"),
     nb.length ? list : el("p", { class: "dim" }, "No links yet."),
     el("div", { class: "f" }, "Last changed"), el("p", null, relTime(n.updated_at)));
@@ -394,7 +512,7 @@ function labelAt(i) {
   if (!labelPool[i]) { const d = el("div", { class: "lb" }); $("labels").append(d); labelPool[i] = d; }
   return labelPool[i];
 }
-const tmp = new THREE.Vector3();
+const tmp = new THREE.Vector3(), tmpE = new THREE.Vector3();
 function toScreen(v) {
   tmp.copy(v).project(camera);
   if (tmp.z > 1 || tmp.z < -1) return null;
@@ -410,6 +528,9 @@ function frame(now) {
   if (keys.has("w") || keys.has("s")) { const dir = keys.has("w") ? -1 : 1; goal.x += Math.sin(cam.yaw) * sp * dir; goal.z += Math.cos(cam.yaw) * sp * dir; }
   if (keys.has("a")) cam.yaw += 1.4 * dt;
   if (keys.has("d")) cam.yaw -= 1.4 * dt;
+  if (!calm) { ringAngle += dt * .012; placeRing(); }
+  const sn = selectedId && graph.byId.get(selectedId);
+  if (sn && sn.ring && !keys.size) goal.set(sn.x, sn.y, sn.z); // keep following a drifting ring node
   target.lerp(goal, 1 - Math.pow(.001, dt));
   if (!calm && !dragging) cam.yaw += dt * .035;
   const cp = Math.cos(cam.pit), dd = cam.dist * Math.min(1.8, Math.max(1, .85 / camera.aspect)); // pull back on portrait screens
@@ -475,11 +596,100 @@ function frame(now) {
   for (const id of nbrIds) want.add(id);
   for (const id of want) { const o = objs.byId && objs.byId.get(id); if (o && o.sprite.visible) showLabel(o.n.name, o.sprite.position, "", o.R * pxPerUnit(o.sprite.position) * 1.5 + 8); }
   for (const l of linkObjs) if (l.sel && l.line.visible && l.link.label) showLabel(l.link.label, l.curve.getPoint(.5), "lk", -6);
+  if (graph.lay.hasHelix) {
+    // era names float beside the helix, on the side facing the camera
+    const ex = Math.sin(cam.yaw) * (HX.R + 64), ez = Math.cos(cam.yaw) * (HX.R + 64);
+    for (const b of graph.lay.bands) if (b.name) showLabel(b.name, tmpE.set(ex, yOfU((b.u0 + b.u1) / 2, graph.lay.U), ez), "era", 0);
+  }
   for (; li < labelPool.length; li++) labelPool[li].style.display = "none";
 
   drawMini();
+  drawStrip();
   requestAnimationFrame(frame);
 }
+
+/* ---------- timeline strip: the helix flattened, click or drag to fly along it ---------- */
+const strip = $("strip"), st = $("st"), sctx = st.getContext("2d"), stTip = $("stTip");
+let stTicks = [], stGeom = null, stDown = false, stMode = "";
+function stripGeometry(w) {
+  const tc = graph.lay.timed.length, rc = graph.lay.ringNodes.length, padX = 12;
+  const inner = w - padX * 2, gap = tc && rc ? 18 : 0;
+  const timedW = tc ? (rc ? Math.round((inner - gap) * .78) : inner) : 0;
+  return { padX, timedW, ringX0: padX + timedW + gap, ringW: rc ? inner - timedW - gap : 0 };
+}
+const stX = (u, g) => g.padX + ((u + .5) / (graph.lay.U + 1)) * g.timedW;
+function drawStrip() {
+  const lay = graph.lay;
+  strip.style.display = graph.nodes.length ? "block" : "none";
+  const cssW = st.clientWidth, cssH = st.clientHeight;
+  if (!graph.nodes.length || !cssW || !cssH) return;
+  const dpr = Math.min(devicePixelRatio || 1, 2);
+  if (st.width !== Math.round(cssW * dpr) || st.height !== Math.round(cssH * dpr)) { st.width = Math.round(cssW * dpr); st.height = Math.round(cssH * dpr); }
+  const c = sctx, g = stripGeometry(cssW), base = cssH * .68;
+  stGeom = g; stTicks = [];
+  c.setTransform(dpr, 0, 0, dpr, 0, 0); c.clearRect(0, 0, cssW, cssH);
+  c.textAlign = "left"; c.font = '10px "Cinzel", Georgia, serif';
+  if (lay.timed.length) {
+    lay.bands.forEach((b, i) => {
+      const x0 = stX(b.u0 - .45, g), x1 = stX(b.u1 + .45, g);
+      c.fillStyle = i % 2 ? "rgba(75,79,168,.22)" : "rgba(142,92,143,.18)";
+      c.beginPath(); c.roundRect(x0, 4, Math.max(2, x1 - x0), cssH - 8, 6); c.fill();
+      if (b.name) {
+        let s = b.name.toUpperCase();
+        while (s.length > 1 && c.measureText(s).width > x1 - x0 - 8) s = s.slice(0, -1);
+        c.fillStyle = "rgba(185,166,214,.9)"; c.fillText(s, x0 + 5, 17);
+      }
+    });
+    c.strokeStyle = "rgba(185,166,214,.35)"; c.lineWidth = 1;
+    c.beginPath(); c.moveTo(g.padX, base); c.lineTo(g.padX + g.timedW, base); c.stroke();
+  }
+  if (lay.ringNodes.length) {
+    c.fillStyle = "rgba(169,155,196,.85)"; c.fillText("NO DATE", g.ringX0 + 2, 17);
+    c.strokeStyle = "rgba(185,166,214,.18)"; c.beginPath(); c.moveTo(g.ringX0, base); c.lineTo(g.ringX0 + g.ringW, base); c.stroke();
+  }
+  const dot = (n, x) => {
+    const t = TYPES[n.type], sel = n.id === selectedId, off = hidden.has(n.type);
+    stTicks.push({ x, n });
+    c.globalAlpha = off ? .18 : 1;
+    c.globalCompositeOperation = "lighter"; c.fillStyle = rgba(t.rgb, sel ? .55 : .3);
+    c.beginPath(); c.arc(x, base, sel ? 9 : 6, 0, TAU); c.fill();
+    c.globalCompositeOperation = "source-over"; c.fillStyle = sel ? "#fff" : t.hex;
+    c.beginPath(); c.arc(x, base, sel ? 4.6 : 3.2, 0, TAU); c.fill();
+    c.globalAlpha = 1;
+  };
+  for (const n of lay.timed) dot(n, stX(n.u, g));
+  lay.ringNodes.forEach((n, i) => dot(n, g.ringX0 + ((i + .5) / lay.ringNodes.length) * g.ringW));
+  if (lay.timed.length) {
+    const u = Math.max(-.5, Math.min(lay.U + .5, target.y / HX.DY + lay.U / 2)), x = stX(u, g);
+    c.strokeStyle = "rgba(233,222,247,.85)"; c.lineWidth = 1.5;
+    c.beginPath(); c.moveTo(x, 5); c.lineTo(x, cssH - 5); c.stroke();
+    c.fillStyle = "#E6DDF3"; c.beginPath(); c.moveTo(x - 4, 3); c.lineTo(x + 4, 3); c.lineTo(x, 9); c.closePath(); c.fill();
+  }
+}
+function stHit(x) {
+  let best = null, bd = 10;
+  for (const t of stTicks) { const d = Math.abs(t.x - x); if (d < bd) { bd = d; best = t.n; } }
+  return best;
+}
+function stSeek(x) {
+  const lay = graph.lay, g = stGeom;
+  if (!g || !lay.timed.length || x < g.padX - 6 || x > g.padX + g.timedW + 6) return;
+  const u = Math.max(0, Math.min(lay.U, ((x - g.padX) / g.timedW) * (lay.U + 1) - .5));
+  goal.set(0, yOfU(u, lay.U), 0);
+}
+st.addEventListener("pointerdown", (e) => {
+  st.setPointerCapture(e.pointerId); stDown = true;
+  const x = e.clientX - st.getBoundingClientRect().left, hit = stHit(x);
+  if (hit) { stMode = "node"; select(hit.id); } else { stMode = "seek"; stSeek(x); }
+});
+st.addEventListener("pointermove", (e) => {
+  const r = st.getBoundingClientRect(), x = e.clientX - r.left, hit = stHit(x);
+  if (hit) { stTip.textContent = hit.name; stTip.style.left = Math.max(0, Math.min(r.width - 8, x)) + "px"; stTip.style.display = "block"; }
+  else stTip.style.display = "none";
+  if (stDown && stMode === "seek") stSeek(x);
+});
+st.addEventListener("pointerup", () => { stDown = false; });
+st.addEventListener("pointerleave", () => { stTip.style.display = "none"; });
 
 /* minimap: top-down view */
 const mm = $("mm"), mctx = mm.getContext("2d");
@@ -513,7 +723,8 @@ function refreshAll(first) {
   selectedId = keep && graph.byId.has(keep) ? keep : null;
   refreshLinkEmphasis();
   showDetail();
-  if (first) { goal.copy(centroid()); target.copy(goal); }
+  HOME.dist = graph.homeDist;
+  if (first) { cam.dist = HOME.dist; goal.copy(centroid()); target.copy(goal); }
   if (!graph.nodes.length) showState("Empty map", "No nodes yet. They will appear here as you and your co-writer add them.", false); else hideState();
 }
 async function poll(first) {
