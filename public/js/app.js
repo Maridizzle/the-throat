@@ -4,7 +4,7 @@
  * Sections: constants, model and API, layout (temporary), scene, UI, loop.
  * Node record (data field): { type, name, summary, links:[{to, label}],
  *   time:{era, order} }. Links live on the source node. A node with a `time`
- * sits on the story-time helix: grouped by era (order of the shared "eras"
+ * sits on the story-time flow: grouped by era (order of the shared "eras"
  * setting, { eras:[{id, name}] }), then by `order`, evenly spaced. A node
  * with no `time` sits on the drifting outer ring. User text is only ever
  * inserted with textContent, never innerHTML.
@@ -71,8 +71,9 @@ function applyState(s) {
 }
 
 /* ---------- graph derived from rows ---------- */
+const HX_DX0 = 52;
 let graph = { nodes: [], byId: new Map(), links: [], nbrs: new Map(),
-  lay: { U: 0, bands: [], timed: [], ringNodes: [], hasHelix: false }, homeDist: 780 };
+  lay: { U: 0, dx: HX_DX0, lanes: [], bands: [], timed: [], ringNodes: [], hasHelix: false }, homeDist: 780 };
 const hash = (str) => {
   let h = 2166136261;
   for (let i = 0; i < str.length; i++) h = Math.imul(h ^ str.charCodeAt(i), 16777619);
@@ -84,13 +85,14 @@ const rng = (seed) => () => {
   t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
   return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
 };
-/* Story-time helix. Timed nodes sit on the helix in order, evenly spaced, with a
- * small extra gap between eras. Untimed nodes live on an outer ring. */
-const HX = { R: 150, ANG: 0.6, DY: 20, GAP: 0.9, RING_R: 430 };
-const yOfU = (u, U) => (u - U / 2) * HX.DY;
-function helixPoint(u, U, out) {
-  const a = u * HX.ANG;
-  return out.set(HX.R * Math.cos(a), yOfU(u, U), HX.R * Math.sin(a));
+/* Story-time flow. Time runs left to right along X. Each node type has its own leyline, a gently
+ * weaving stream, and timed nodes sit on their type's stream in story order, evenly spaced, with a
+ * small extra gap between eras. Untimed nodes drift in a cloud that orbits the whole flow. */
+const HX = { DX: 52, LANE: 74, WEAVE_Y: 26, WEAVE_Z: 30, GAP: .9, CLOUD_PAD: 190 };
+const xOfU = (u, lay) => (u - lay.U / 2) * lay.dx;
+function streamPoint(lay, type, x, out) {
+  const k = Math.max(0, lay.lanes.indexOf(type)), ph = k * 1.7;
+  return out.set(x, Math.sin(x * .0075 + ph) * HX.WEAVE_Y, (k - (lay.lanes.length - 1) / 2) * HX.LANE + Math.sin(x * .0052 + ph * 1.3) * HX.WEAVE_Z);
 }
 const hasTime = (d) => !!d.time && typeof d.time === "object" && (d.time.era != null || Number.isFinite(d.time.order));
 function layoutNodes(nodes) {
@@ -122,18 +124,21 @@ function layoutNodes(nodes) {
     prev = k; u += 1;
   });
   const U = timed.length ? timed[timed.length - 1].u : 0;
+  const lanes = TYPE_ORDER.filter((t) => timed.some((n) => n.type === t));
+  const lay = { U, dx: Math.max(30, Math.min(HX.DX, 2600 / Math.max(U, 1))), lanes, bands, timed, ringNodes, hasHelix: timed.length > 0 };
   const v = new THREE.Vector3();
-  for (const n of timed) { helixPoint(n.u, U, v); n.x = v.x; n.y = v.y; n.z = v.z; }
+  for (const n of timed) { streamPoint(lay, n.type, xOfU(n.u, lay), v); n.x = v.x; n.y = v.y; n.z = v.z; }
+  const cloudR = Math.max(260, (lanes.length * HX.LANE) / 2 + HX.CLOUD_PAD), span = Math.max(U * lay.dx, 900) * 1.05;
   ringNodes.sort((a, b) => a.id.localeCompare(b.id));
   ringNodes.forEach((n, i) => {
     n.ring = {
-      a0: (i / ringNodes.length) * TAU + ((hash(n.id) % 100) / 100 - .5) * .25,
-      r: HX.RING_R * (.92 + ((hash(n.id + "r") % 100) / 100) * .16),
-      y: ((hash(n.id + "y") % 1000) / 1000 - .5) * 240,
+      a0: ((i * 0.618034) % 1) * TAU + ((hash(n.id) % 100) / 100 - .5) * .25,
+      r: cloudR * (.9 + ((hash(n.id + "r") % 100) / 100) * .22),
+      x: ((i + .5) / ringNodes.length - .5) * span + ((hash(n.id + "x") % 100) / 100 - .5) * 50,
     };
-    n.x = Math.cos(n.ring.a0) * n.ring.r; n.z = Math.sin(n.ring.a0) * n.ring.r; n.y = n.ring.y;
+    n.x = n.ring.x; n.y = Math.cos(n.ring.a0) * n.ring.r * .8; n.z = Math.sin(n.ring.a0) * n.ring.r;
   });
-  return { U, bands, timed, ringNodes, hasHelix: timed.length > 0 };
+  return lay;
 }
 function rebuildGraph() {
   const nodes = [], byId = new Map();
@@ -165,9 +170,9 @@ function rebuildGraph() {
   }
   const lay = layoutNodes(nodes);
   for (const l of links) l.moving = !!(l.a.ring || l.b.ring);
-  let extY = 150, extXZ = 200;
-  for (const n of nodes) { extY = Math.max(extY, Math.abs(n.y)); extXZ = Math.max(extXZ, Math.hypot(n.x, n.z)); }
-  const homeDist = Math.min(2200, Math.max(560, extY * 2.4, extXZ * 2.0));
+  let extX = 200, extYZ = 200;
+  for (const n of nodes) { extX = Math.max(extX, Math.abs(n.x)); extYZ = Math.max(extYZ, Math.hypot(n.y, n.z)); }
+  const homeDist = Math.min(3600, Math.max(560, extX * 1.55, extYZ * 2.6));
   graph = { nodes, byId, links, nbrs, lay, homeDist };
 }
 
@@ -181,12 +186,12 @@ const renderer = new THREE.WebGLRenderer({ canvas: cv, antialias: true, alpha: t
 renderer.setClearColor(0x000000, 0);
 const scene = new THREE.Scene();
 scene.fog = new THREE.FogExp2(0x0B0714, 0.00042);
-const camera = new THREE.PerspectiveCamera(50, 1, 5, 4000);
+const camera = new THREE.PerspectiveCamera(50, 1, 5, 9000);
 let W = 0, H = 0;
 
 let quality = 2, calm = false;
-const cam = { yaw: 0.5, pit: 0.32, dist: 780 };
-const HOME = { yaw: 0.5, pit: 0.32, dist: 780 };
+const cam = { yaw: 0.12, pit: 0.3, dist: 780 };
+const HOME = { yaw: 0.12, pit: 0.3, dist: 780 };
 const target = new THREE.Vector3(), goal = new THREE.Vector3();
 
 function resize() {
@@ -295,21 +300,23 @@ function updateLinkGeom(lo) {
   const l = lo.link, c = lo.curve;
   c.v0.set(l.a.x, l.a.y, l.a.z); c.v2.set(l.b.x, l.b.y, l.b.z);
   c.v1.copy(c.v0).add(c.v2).multiplyScalar(.5);
-  tmpP.subVectors(c.v2, c.v0).cross(UP);
-  if (tmpP.lengthSq() < 1e-6) tmpP.set(1, 0, 0);
-  tmpP.normalize().multiplyScalar(c.v0.distanceTo(c.v2) * l.bend);
+  if (l.moving) {
+    tmpP.subVectors(c.v2, c.v0).cross(UP);
+    if (tmpP.lengthSq() < 1e-6) tmpP.set(1, 0, 0);
+    tmpP.normalize().multiplyScalar(c.v0.distanceTo(c.v2) * l.bend);
+  } else tmpP.set(0, c.v0.distanceTo(c.v2) * (.14 + Math.abs(l.bend) * .6), 0); // links between timed nodes arch over the flow
   c.v1.add(tmpP);
   const pos = lo.line.geometry.attributes.position, n = pos.count;
   for (let i = 0; i < n; i++) { c.getPoint(i / (n - 1), tmpQ); pos.setXYZ(i, tmpQ.x, tmpQ.y, tmpQ.z); }
   pos.needsUpdate = true;
 }
-// Ring nodes drift slowly around the helix. Moves sprites and the links attached to them.
+// Cloud nodes drift slowly around the flow. Moves sprites and the links attached to them.
 function placeRing() {
   for (const o of objs) {
     const r = o.n.ring; if (!r) continue;
     const a = r.a0 + ringAngle;
-    o.n.x = Math.cos(a) * r.r; o.n.z = Math.sin(a) * r.r;
-    o.n.y = r.y + (calm ? 0 : Math.sin(time * .4 + o.ph) * 6);
+    o.n.x = r.x; o.n.z = Math.sin(a) * r.r;
+    o.n.y = Math.cos(a) * r.r * .8 + (calm ? 0 : Math.sin(time * .4 + o.ph) * 6);
     o.sprite.position.set(o.n.x, o.n.y, o.n.z);
     if (o.glow) o.glow.position.copy(o.sprite.position);
   }
@@ -318,25 +325,33 @@ function placeRing() {
 function buildDecor() {
   const lay = graph.lay;
   if (!lay.hasHelix) return;
-  const pts = [];
-  for (let u = -.8; u <= lay.U + .8 + 1e-6; u += .25) pts.push(helixPoint(u, lay.U, new THREE.Vector3()));
-  const curve = new THREE.CatmullRomCurve3(pts);
-  const tube = (radius, opacity) => {
-    const m = new THREE.Mesh(new THREE.TubeGeometry(curve, pts.length * 2, radius, 6, false),
-      new THREE.MeshBasicMaterial({ color: 0xB9A6D6, transparent: true, opacity, blending: THREE.AdditiveBlending, depthWrite: false }));
-    m.renderOrder = 0; group.add(m); decorObjs.push(m);
-  };
-  tube(1.3, .55);
-  if (quality >= 1) tube(5, .09);
+  const x0 = xOfU(-.8, lay), x1 = xOfU(lay.U + .8, lay), reach = lay.lanes.length * HX.LANE / 2 + 70;
+  const add = (m) => { m.renderOrder = 0; group.add(m); decorObjs.push(m); };
+  for (const type of lay.lanes) { // one glowing leyline per node type
+    const pts = [];
+    for (let x = x0; x <= x1 + 1e-6; x += 24) pts.push(streamPoint(lay, type, x, new THREE.Vector3()));
+    const curve = new THREE.CatmullRomCurve3(pts);
+    const tube = (radius, opacity) => add(new THREE.Mesh(new THREE.TubeGeometry(curve, pts.length * 2, radius, 6, false),
+      new THREE.MeshBasicMaterial({ color: new THREE.Color(TYPES[type].hex), transparent: true, opacity, blending: THREE.AdditiveBlending, depthWrite: false })));
+    tube(1.1, .5);
+    if (quality >= 1) tube(5, .09);
+  }
   if (!lay.bands.some((b) => b.key !== "")) return;
-  const edges = lay.bands.map((b, i) => b.u0 - (i === 0 ? .5 : HX.GAP / 2));
-  edges.push(lay.bands[lay.bands.length - 1].u1 + .5);
-  for (const eu of edges) {
+  const edges = lay.bands.map((b, i) => xOfU(b.u0 - (i === 0 ? .5 : HX.GAP / 2), lay));
+  edges.push(xOfU(lay.bands[lay.bands.length - 1].u1 + .5, lay));
+  lay.bands.forEach((b, i) => { // soft glowing pool under each era
+    const pool = new THREE.Mesh(new THREE.PlaneGeometry(1, 1),
+      new THREE.MeshBasicMaterial({ map: glowTex, color: i % 2 ? 0xB9A6D6 : 0x6D72D6, transparent: true, opacity: i % 2 ? .1 : .16, blending: THREE.AdditiveBlending, depthWrite: false }));
+    pool.rotation.x = -Math.PI / 2;
+    pool.position.set((edges[i] + edges[i + 1]) / 2, -120, 0);
+    pool.scale.set(edges[i + 1] - edges[i] + lay.dx * 1.2, (reach + 60) * 2, 1);
+    add(pool);
+  });
+  for (const ex of edges) { // faint boundary where one era gives way to the next
     const ring = [];
-    for (let i = 0; i < 96; i++) { const a = i / 96 * TAU; ring.push(new THREE.Vector3(Math.cos(a) * (HX.R + 46), yOfU(eu, lay.U), Math.sin(a) * (HX.R + 46))); }
-    const m = new THREE.LineLoop(new THREE.BufferGeometry().setFromPoints(ring),
-      new THREE.LineBasicMaterial({ color: 0x6D72D6, transparent: true, opacity: .4, blending: THREE.AdditiveBlending, depthWrite: false }));
-    m.renderOrder = 0; group.add(m); decorObjs.push(m);
+    for (let i = 0; i < 64; i++) { const a = i / 64 * TAU; ring.push(new THREE.Vector3(ex, Math.sin(a) * 120, Math.cos(a) * (reach + 30))); }
+    add(new THREE.LineLoop(new THREE.BufferGeometry().setFromPoints(ring),
+      new THREE.LineBasicMaterial({ color: 0x6D72D6, transparent: true, opacity: .22, blending: THREE.AdditiveBlending, depthWrite: false })));
   }
 }
 const radiusOf = (n) => 16 + Math.min(n.deg, 7) * 2.2;
@@ -515,7 +530,7 @@ function showDetail() {
     n.summary ? el("p", null, n.summary) : el("p", { class: "dim" }, "No summary yet."),
     imagesBlock(n),
     el("div", { class: "f" }, "Story time"),
-    n.u == null ? el("p", { class: "dim" }, "No story time yet (outer ring)") : el("p", null, whenText(n)),
+    n.u == null ? el("p", { class: "dim" }, "No story time yet (drifting cloud)") : el("p", null, whenText(n)),
     el("div", { class: "f" }, "Connected to (" + nb.length + ")"),
     nb.length ? list : el("p", { class: "dim" }, "No links yet."),
     el("div", { class: "f" }, "Last changed"), el("p", null, relTime(n.updated_at) + byText(n.by)),
@@ -555,16 +570,16 @@ function centroid() {
 }
 
 /* input */
-let dragging = false, px = 0, py = 0, moved = 0, mx = -999, my = -999;
+let dragging = false, px = 0, py = 0, moved = 0, mx = -999, my = -999, mouseOn = false;
 cv.addEventListener("pointerdown", (e) => { cv.setPointerCapture(e.pointerId); dragging = true; cv.classList.add("drag"); px = e.clientX; py = e.clientY; moved = 0; });
 cv.addEventListener("pointermove", (e) => {
-  mx = e.clientX; my = e.clientY;
+  mx = e.clientX; my = e.clientY; mouseOn = e.pointerType === "mouse";
   if (!dragging) return;
   const dx = e.clientX - px, dy = e.clientY - py; px = e.clientX; py = e.clientY; moved += Math.abs(dx) + Math.abs(dy);
   cam.yaw -= dx * .0052; cam.pit = Math.max(-1.25, Math.min(1.25, cam.pit + dy * .0052));
 });
 cv.addEventListener("pointerup", () => { dragging = false; cv.classList.remove("drag"); if (moved < 6) select(hoverId); });
-cv.addEventListener("pointerleave", () => { mx = my = -999; });
+cv.addEventListener("pointerleave", () => { mx = my = -999; mouseOn = false; });
 cv.addEventListener("wheel", (e) => { e.preventDefault(); cam.dist = Math.max(260, Math.min(2200, cam.dist * Math.exp(e.deltaY * .0011))); }, { passive: false });
 const keys = new Set();
 const typing = (e) => /^(INPUT|SELECT|TEXTAREA)$/.test((e.target && e.target.tagName) || "");
@@ -1029,7 +1044,7 @@ function openErasEditor() {
   let list = eraList().map((e) => ({ id: String(e.id), name: String(e.name || "") }));
   const box = el("div");
   const draw = () => {
-    box.replaceChildren(el("p", { class: "dim" }, "Eras run from the bottom of the helix to the top, in this order. They can be renamed and reordered, not deleted."));
+    box.replaceChildren(el("p", { class: "dim" }, "Eras run from the left end of the flow to the right, in this order. They can be renamed and reordered, not deleted."));
     list.forEach((e, i) => {
       const inp = el("input", { type: "text", maxlength: LIM.era, placeholder: "Era name", "aria-label": "Era " + (i + 1) + " name" }); inp.value = e.name;
       inp.addEventListener("input", () => { e.name = inp.value; });
@@ -1387,7 +1402,7 @@ async function restoreWholeMap(b, snap, shownSig, rerender) {
 $("historyBtn").addEventListener("click", openHistory);
 
 /* ---------- labels ---------- */
-const labelPool = [];
+const labelPool = [], NEAR_PX = 80;
 function labelAt(i) {
   if (!labelPool[i]) { const d = el("div", { class: "lb" }); $("labels").append(d); labelPool[i] = d; }
   return labelPool[i];
@@ -1402,6 +1417,7 @@ function pxPerUnit(pos) { return H / (2 * Math.tan(camera.fov * Math.PI / 360) *
 
 /* ---------- loop ---------- */
 let last = performance.now(), time = 0;
+let swayPrev = 0;
 function frame(now) {
   const dt = Math.min(.05, (now - last) / 1000); last = now; time += dt;
   const sp = (keys.has("shift") ? 2 : 1) * 320 * dt;
@@ -1412,7 +1428,9 @@ function frame(now) {
   const sn = selectedId && graph.byId.get(selectedId);
   if (sn && sn.ring && !keys.size) goal.set(sn.x, sn.y, sn.z); // keep following a drifting ring node
   target.lerp(goal, 1 - Math.pow(.001, dt));
-  if (!calm && !dragging) cam.yaw += dt * .035;
+  // a soft sway (about 7 degrees each way) instead of a full spin, applied as a change so manual orbiting is kept
+  const sway = calm || dragging ? swayPrev : Math.sin(time * .15) * .12;
+  cam.yaw += sway - swayPrev; swayPrev = sway;
   const cp = Math.cos(cam.pit), dd = cam.dist * Math.min(1.8, Math.max(1, .85 / camera.aspect)); // pull back on portrait screens
   camera.position.set(target.x + Math.sin(cam.yaw) * cp * dd, target.y + Math.sin(cam.pit) * dd, target.z + Math.cos(cam.yaw) * cp * dd);
   camera.lookAt(target);
@@ -1479,10 +1497,11 @@ function frame(now) {
 
   // labels
   let li = 0;
-  const showLabel = (txt, pos, cls, dy, color) => {
+  const showLabel = (txt, pos, cls, dy, color, alpha) => {
     const s = toScreen(pos); if (!s || li >= 24) return;
     const d = labelAt(li++); d.textContent = txt; d.className = "lb" + (cls ? " " + cls : "");
     d.style.color = color || "";
+    d.style.opacity = alpha == null ? "" : alpha.toFixed(2);
     d.style.display = "block";
     d.style.transform = `translate(${Math.round(s.x)}px,${Math.round(s.y + dy)}px) translateX(-50%)`;
   };
@@ -1491,11 +1510,22 @@ function frame(now) {
   if (hoverId) want.add(hoverId);
   for (const id of nbrIds) want.add(id);
   for (const id of want) { const o = objs.byId && objs.byId.get(id); if (o && o.sprite.visible) showLabel(o.n.name, o.sprite.position, "", o.R * pxPerUnit(o.sprite.position) * 1.5 + 8); }
+  // Desktop mouse only: a name fades in as the pointer nears a node (within NEAR_PX of its edge) and fades out as it leaves.
+  for (const o of objs) {
+    let target = 0;
+    if (mouseOn && !dragging && o.sprite.visible) {
+      const s = toScreen(o.sprite.position);
+      if (s) { const gap = Math.hypot(mx - s.x, my - s.y) - o.R * pxPerUnit(o.sprite.position); target = gap <= 0 ? 1 : Math.max(0, 1 - gap / NEAR_PX); }
+    }
+    o.near = (o.near || 0) + (target - (o.near || 0)) * (1 - Math.exp(-dt * (calm ? 5 : 9)));
+    if (o.near < .03) o.near = 0;
+    if (o.near > 0 && !want.has(o.n.id)) showLabel(o.n.name, o.sprite.position, "", o.R * pxPerUnit(o.sprite.position) * 1.5 + 8, "", o.near);
+  }
   for (const l of linkObjs) if (l.sel && l.line.visible && l.link.label) showLabel(l.link.label, l.curve.getPoint(.5), "lk", -6);
   if (graph.lay.hasHelix) {
-    // era names float beside the helix, on the side facing the camera
-    const ex = Math.sin(cam.yaw) * (HX.R + 64), ez = Math.cos(cam.yaw) * (HX.R + 64);
-    for (const b of graph.lay.bands) if (b.name) showLabel(b.name, tmpE.set(ex, yOfU((b.u0 + b.u1) / 2, graph.lay.U), ez), "era", 0);
+    // era names float above the flow, centered on their zone
+    const lay = graph.lay;
+    for (const b of lay.bands) if (b.name) showLabel(b.name, tmpE.set(xOfU((b.u0 + b.u1) / 2, lay), 170, 0), "era", 0);
   }
   for (const e of presShow) showLabel(e.p.name + (e.p.editing ? " is editing" : ""), e.o.sprite.position, "pres", -(e.o.R * pxPerUnit(e.o.sprite.position) * 2.3 + 12), e.p.color);
   for (; li < labelPool.length; li++) labelPool[li].style.display = "none";
@@ -1505,7 +1535,7 @@ function frame(now) {
   requestAnimationFrame(frame);
 }
 
-/* ---------- timeline strip: the helix flattened, click or drag to fly along it ---------- */
+/* ---------- timeline strip: the flow flattened, click or drag to fly along it ---------- */
 const strip = $("strip"), st = $("st"), sctx = st.getContext("2d"), stTip = $("stTip");
 let stTicks = [], stGeom = null, stDown = false, stMode = "";
 function stripGeometry(w) {
@@ -1560,7 +1590,7 @@ function drawStrip() {
   for (const n of lay.timed) dot(n, stX(n.u, g));
   lay.ringNodes.forEach((n, i) => dot(n, g.ringX0 + ((i + .5) / lay.ringNodes.length) * g.ringW));
   if (lay.timed.length) {
-    const u = Math.max(-.5, Math.min(lay.U + .5, target.y / HX.DY + lay.U / 2)), x = stX(u, g);
+    const u = Math.max(-.5, Math.min(lay.U + .5, target.x / lay.dx + lay.U / 2)), x = stX(u, g);
     c.strokeStyle = "rgba(233,222,247,.85)"; c.lineWidth = 1.5;
     c.beginPath(); c.moveTo(x, 5); c.lineTo(x, cssH - 5); c.stroke();
     c.fillStyle = "#E6DDF3"; c.beginPath(); c.moveTo(x - 4, 3); c.lineTo(x + 4, 3); c.lineTo(x, 9); c.closePath(); c.fill();
@@ -1575,7 +1605,7 @@ function stSeek(x) {
   const lay = graph.lay, g = stGeom;
   if (!g || !lay.timed.length || x < g.padX - 6 || x > g.padX + g.timedW + 6) return;
   const u = Math.max(0, Math.min(lay.U, ((x - g.padX) / g.timedW) * (lay.U + 1) - .5));
-  goal.set(0, yOfU(u, lay.U), 0);
+  goal.set(xOfU(u, lay), 0, 0);
 }
 st.addEventListener("pointerdown", (e) => {
   st.setPointerCapture(e.pointerId); stDown = true;
@@ -1682,6 +1712,7 @@ function refreshAll(first) {
   refreshLinkEmphasis();
   showDetail();
   HOME.dist = graph.homeDist;
+  scene.fog.density = Math.min(0.00042, 0.00042 * 1100 / graph.homeDist); // keep the far end of a long flow visible
   if (first) { cam.dist = HOME.dist; goal.copy(centroid()); target.copy(goal); }
   const nHidden = [...model.rows.values()].filter((r) => r.hidden).length;
   $("hiddenBtn").style.display = nHidden ? "" : "none";

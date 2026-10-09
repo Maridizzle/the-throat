@@ -14,10 +14,10 @@ Nothing in this file invents story content. Empty slots use TBD tokens.
 | From Saintalia | Images stored in each node. |
 | AI chat proxy | Not included to start. |
 | 3D | Fly-through, WebGL (three.js, pinned version; memoir uses r128 from cdnjs). |
-| Time axis | Story time, on a helix. |
-| Time scale | Ordered beats with labeled era bands. Era names are `ERA_TBD_01` style tokens until named. |
-| Timeless nodes | Outer drifting ring, linked by threads to the events they affect. |
-| Scrub strip | A flat straightened timeline along the bottom to jump around the helix. |
+| Time axis | Story time runs left to right along the X axis (changed from a vertical helix). Each node type has its own glowing leyline, a gently weaving stream, and timed nodes sit on their type's stream in story order. Links between timed nodes arch over the flow. |
+| Time scale | Ordered beats with labeled eras, drawn as soft glowing pools along the flow with faint boundaries and the era name floating above. Era names are `ERA_TBD_01` style tokens until named. |
+| Timeless nodes | A drifting cloud that orbits the whole flow, linked by threads to the events they affect. |
+| Scrub strip | A flat straightened timeline along the bottom to jump along the flow. |
 | Node types | Character, Place, Rule, Thread, Open question, plus Faction, Lore and Chapter (added for seeding). Each has its own shape and a tint inside the violet range. Anything else shows as Untyped. |
 | Sync | Per-node saves with a revision check. A stale save returns a conflict, never a silent overwrite. |
 | Images | Inside the node record. Up to 12 per node. Resized in the browser to 900 px on the longest side, JPEG 0.82 (same as Saintalia), plus a 200 px thumbnail and an optional caption. Server accepts only JPEG data URIs with size limits. Saintalia's "paste a URL" mode and its `prompt` field were not carried over. |
@@ -35,6 +35,8 @@ Nothing in this file invents story content. Empty slots use TBD tokens.
 | Live data care | The site now holds the real story. Backups live in the same database as the story, so a copy saved on the writer's own computer (Export) is the only protection that does not depend on Railway. All testing uses throwaway local data, never the live database. Nothing is pushed without Maridizzle's typed yes. |
 | Removal | Hide and unhide only. Nothing is hard-deleted. |
 | Backup pruning | Off by default. Opt in with `BACKUP_KEEP`. |
+| Hover names | Desktop mouse only. A node's name fades in as the pointer comes within 80 px of its edge and fades out as it leaves. Several can show at once, each fading by its own distance. Touch is unchanged. |
+| Camera | Starts looking at the flow from the front. A soft sway of about 7 degrees each way replaces the old full spin, and manual orbiting is kept. Calm mode stops it. |
 | Calm mode | Stops drift and pulses. Follows `prefers-reduced-motion`. |
 | Quality | Low, Medium, High. |
 
@@ -51,6 +53,7 @@ Order set by Maridizzle: put it on Railway first, then writer logins, then seed 
    - Import: the three new types and the Import button with a preview.
    - Layers lists: the node list under each layer.
    - Export: the readable copy (`.md`) and the full backup (`.json`) buttons.
+   - Hover names and the left-to-right flow with type leylines (display only, no data or server changes). Tested on throwaway data: strictly left to right order, six streams, strip seek, Reset view, node select, phone width. Not tested: a real GPU, hundreds of nodes, many timed nodes of one type (names about 52 units apart).
 3. **Railway deploy.** Done by Maridizzle. Checklist below.
 4. **Writer logins.** Built and tested (server L1, client L2), including two real browser sessions at once. Turning it on is a Railway variable change by Maridizzle (see the checklist, step 7).
 5. **Seeding.** Done. The 34 sections were imported on the live site (Maridizzle confirmed it worked). What remains is Maridizzle's: placing nodes in story time, adding links, and retyping any seeded node whose type was a best guess.
