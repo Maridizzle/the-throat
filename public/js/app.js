@@ -1623,25 +1623,46 @@ st.addEventListener("pointerleave", () => { stTip.style.display = "none"; });
 
 /* minimap: top-down view */
 const mm = $("mm"), mctx = mm.getContext("2d");
+let miniSide = false; // false: top-down (X across, Z down). true: side view (X across, height up)
+$("mmView").addEventListener("click", () => { miniSide = !miniSide; $("mmView").textContent = miniSide ? "Side" : "Top"; });
 function drawMini() {
-  const w = 150, h = 150, ox = w / 2, oy = h / 2;
+  const w = 200, h = 100, ox = w / 2, oy = h / 2, lay = graph.lay;
+  const vOf = (x, y, z) => (miniSide ? -y : z); // vertical screen axis
   mctx.clearRect(0, 0, w, h);
-  let ext = 200;
-  for (const n of graph.nodes) ext = Math.max(ext, Math.abs(n.x - 0), Math.abs(n.z - 0));
-  const sc = (w * .44) / ext;
-  mctx.strokeStyle = "rgba(185,166,214,.12)"; mctx.lineWidth = 1;
-  mctx.beginPath(); mctx.arc(ox, oy, w * .45, 0, TAU); mctx.stroke();
-  mctx.beginPath(); mctx.arc(ox, oy, w * .22, 0, TAU); mctx.stroke();
+  let extX = 200, extV = 100;
+  for (const n of graph.nodes) { extX = Math.max(extX, Math.abs(n.x)); extV = Math.max(extV, Math.abs(vOf(n.x, n.y, n.z))); }
+  const sc = Math.min((w * .46) / extX, (h * .44) / extV); // one scale for both axes, so shapes are not stretched
+  mctx.strokeStyle = "rgba(185,166,214,.14)"; mctx.lineWidth = 1;
+  mctx.beginPath(); mctx.moveTo(4, oy); mctx.lineTo(w - 4, oy); mctx.stroke(); // center line of the flow
+  if (lay.hasHelix) {
+    // era boundaries as faint ticks
+    mctx.strokeStyle = "rgba(109,114,214,.28)";
+    const edges = lay.bands.map((b, i) => xOfU(b.u0 - (i === 0 ? .5 : HX.GAP / 2), lay));
+    edges.push(xOfU(lay.bands[lay.bands.length - 1].u1 + .5, lay));
+    if (lay.bands.some((b) => b.key !== "")) for (const ex of edges) { mctx.beginPath(); mctx.moveTo(ox + ex * sc, 6); mctx.lineTo(ox + ex * sc, h - 6); mctx.stroke(); }
+    // one faint leyline per type, in its tint
+    const p = new THREE.Vector3(), x0 = xOfU(-.8, lay), x1 = xOfU(lay.U + .8, lay);
+    for (const type of lay.lanes) {
+      if (hidden.has(type)) continue;
+      mctx.strokeStyle = rgba(TYPES[type].rgb, .38); mctx.beginPath();
+      for (let x = x0, first = true; x <= x1 + 1e-6; x += 30, first = false) {
+        streamPoint(lay, type, x, p);
+        const px = ox + p.x * sc, py = oy + vOf(p.x, p.y, p.z) * sc;
+        if (first) mctx.moveTo(px, py); else mctx.lineTo(px, py);
+      }
+      mctx.stroke();
+    }
+  }
   for (const n of graph.nodes) {
     if (hidden.has(n.type)) continue;
     const t = TYPES[n.type], sel = n.id === selectedId;
     mctx.fillStyle = sel ? "#fff" : rgba(t.rgb, .9); mctx.shadowColor = t.hex; mctx.shadowBlur = sel ? 8 : 3;
-    mctx.beginPath(); mctx.arc(ox + n.x * sc, oy + n.z * sc, sel ? 3.2 : 2, 0, TAU); mctx.fill();
+    mctx.beginPath(); mctx.arc(ox + n.x * sc, oy + vOf(n.x, n.y, n.z) * sc, sel ? 3.2 : 2, 0, TAU); mctx.fill();
   }
   mctx.shadowBlur = 0;
-  const cx = Math.max(4, Math.min(w - 4, ox + camera.position.x * sc)), cz = Math.max(4, Math.min(h - 4, oy + camera.position.z * sc));
-  mctx.strokeStyle = "rgba(233,222,247,.5)"; mctx.beginPath(); mctx.moveTo(cx, cz); mctx.lineTo(ox + target.x * sc, oy + target.z * sc); mctx.stroke();
-  mctx.fillStyle = "#E6DDF3"; mctx.beginPath(); mctx.arc(cx, cz, 3, 0, TAU); mctx.fill();
+  const cx = Math.max(4, Math.min(w - 4, ox + camera.position.x * sc)), cv2 = Math.max(4, Math.min(h - 4, oy + vOf(camera.position.x, camera.position.y, camera.position.z) * sc));
+  mctx.strokeStyle = "rgba(233,222,247,.5)"; mctx.beginPath(); mctx.moveTo(cx, cv2); mctx.lineTo(ox + target.x * sc, oy + vOf(target.x, target.y, target.z) * sc); mctx.stroke();
+  mctx.fillStyle = "#E6DDF3"; mctx.beginPath(); mctx.arc(cx, cv2, 3, 0, TAU); mctx.fill();
 }
 
 /* ---------- identity and presence ---------- */

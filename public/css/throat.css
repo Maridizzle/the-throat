@@ -85,7 +85,10 @@ body.calm #legend .exp svg{transition:none}
   font-size:13px;white-space:nowrap}
 #mini{bottom:16px;right:16px;padding:8px}
 #mini canvas{display:block;border-radius:8px;background:rgba(11,7,20,.6)}
-#mini small{display:block;text-align:center;color:var(--muted);font-size:10px;letter-spacing:.14em;margin-top:5px}
+#mini .mmbar{display:flex;align-items:center;justify-content:space-between;margin-top:5px}
+#mini small{color:var(--muted);font-size:10px;letter-spacing:.14em}
+#mini button{font-size:11px;padding:1px 9px;border-radius:999px;cursor:pointer;background:rgba(11,7,20,.7);border:1px solid rgba(185,166,214,.35)}
+#mini button:hover{border-color:var(--thistle);box-shadow:0 0 10px rgba(185,166,214,.35)}
 #hint{bottom:16px;left:16px;padding:9px 14px;font-size:13px;color:var(--muted);max-width:250px;line-height:1.35}
 #state{top:50%;left:50%;transform:translate(-50%,-50%);padding:22px 28px;text-align:center;max-width:420px;display:none}
 #state.show{display:block}

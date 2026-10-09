@@ -37,6 +37,7 @@ Nothing in this file invents story content. Empty slots use TBD tokens.
 | Backup pruning | Off by default. Opt in with `BACKUP_KEEP`. |
 | Hover names | Desktop mouse only. A node's name fades in as the pointer comes within 80 px of its edge and fades out as it leaves. Several can show at once, each fading by its own distance. Touch is unchanged. |
 | Camera | Starts looking at the flow from the front. A soft sway of about 7 degrees each way replaces the old full spin, and manual orbiting is kept. Calm mode stops it. |
+| Overview map | A wide 200 by 100 strip sized for the long flow, hidden on phones. Time runs left to right, with a faint leyline per type, era ticks, the untimed cloud, and the camera marker. A Top / Side button switches between looking down (width of the cloud) and looking from the front (weave of the streams). The choice is not remembered after a reload. Tested on throwaway data at 1280 px wide; not tested between about 1000 and 1200 px or with hundreds of nodes. |
 | Calm mode | Stops drift and pulses. Follows `prefers-reduced-motion`. |
 | Quality | Low, Medium, High. |
 
