@@ -21,9 +21,12 @@ const TYPES = {
   rule: { label: "Rule", hex: "#A073DA", shape: "hexagon" },
   thread: { label: "Thread", hex: "#C48CB8", shape: "triangle" },
   question: { label: "Open question", hex: "#9DB0F0", shape: "ring" },
+  faction: { label: "Faction", hex: "#8FA6C9", shape: "square" },
+  lore: { label: "Lore", hex: "#C9B8E6", shape: "pentagon" },
+  chapter: { label: "Chapter", hex: "#C98BB0", shape: "octagon" },
   other: { label: "Untyped", hex: "#9A8FB5", shape: "circle" },
 };
-const TYPE_ORDER = ["character", "place", "rule", "thread", "question", "other"];
+const TYPE_ORDER = ["character", "place", "rule", "thread", "question", "faction", "lore", "chapter", "other"];
 const hex2rgb = (h) => [parseInt(h.slice(1, 3), 16), parseInt(h.slice(3, 5), 16), parseInt(h.slice(5, 7), 16)];
 for (const k in TYPES) TYPES[k].rgb = hex2rgb(TYPES[k].hex);
 const mixc = (a, b, t) => a.map((v, i) => Math.round(v + (b[i] - v) * t));
@@ -211,8 +214,9 @@ function shapePath(c, shape, x, y, r) {
   c.beginPath();
   if (shape === "circle") { c.arc(x, y, r, 0, TAU); return; }
   if (shape === "ring") { c.arc(x, y, r, 0, TAU); c.moveTo(x + r * .55, y); c.arc(x, y, r * .55, 0, TAU, true); return; }
-  const n = { diamond: 4, hexagon: 6, triangle: 3 }[shape], rot = shape === "hexagon" ? 0 : -Math.PI / 2;
-  const k = shape === "diamond" ? 1.2 : 1.08;
+  const n = { diamond: 4, hexagon: 6, triangle: 3, square: 4, pentagon: 5, octagon: 8 }[shape];
+  const rot = { hexagon: 0, square: -Math.PI / 4, octagon: Math.PI / 8 }[shape] ?? -Math.PI / 2;
+  const k = { diamond: 1.2, square: 1.15, octagon: 1.04 }[shape] || 1.08;
   for (let i = 0; i < n; i++) { const a = rot + i * TAU / n, px = x + Math.cos(a) * r * k, py = y + Math.sin(a) * r * k; i ? c.lineTo(px, py) : c.moveTo(px, py); }
   c.closePath();
 }
@@ -404,6 +408,9 @@ const icons = {
   hexagon: '<polygon points="16,9 12.5,15 5.5,15 2,9 5.5,3 12.5,3" fill="currentColor"/>',
   triangle: '<polygon points="9,2 16.5,15.5 1.5,15.5" fill="currentColor"/>',
   ring: '<circle cx="9" cy="9" r="5.5" fill="none" stroke="currentColor" stroke-width="3"/>',
+  square: '<rect x="3" y="3" width="12" height="12" rx="1.5" fill="currentColor"/>',
+  pentagon: '<polygon points="9,1.8 16,7 13.3,15.5 4.7,15.5 2,7" fill="currentColor"/>',
+  octagon: '<polygon points="6,2 12,2 16,6 16,12 12,16 6,16 2,12 2,6" fill="currentColor"/>',
 };
 function el(tag, props, ...kids) {
   const e = document.createElement(tag);
@@ -722,7 +729,7 @@ function renderEditor() {
   const d = $("detail"), base = editing.base;
   d.classList.add("editing");
   const typeSel = el("select", { id: "f-type" }, el("option", { value: "" }, "Choose a type..."));
-  const types = ["character", "place", "rule", "thread", "question"];
+  const types = ["character", "place", "rule", "thread", "question", "faction", "lore", "chapter"];
   if (base.type && !types.includes(base.type)) types.push(base.type);
   for (const k of types) typeSel.append(el("option", { value: k }, TYPES[k] ? TYPES[k].label : String(k)));
   typeSel.value = base.type || "";
@@ -998,6 +1005,89 @@ function openErasEditor() {
 $("newNode").addEventListener("click", () => startEdit(null));
 $("erasBtn").addEventListener("click", openErasEditor);
 $("hiddenBtn").addEventListener("click", openHiddenList);
+
+/* import: load nodes from a seed file, with a full preview first. Skips anything already there. */
+const SEED_FORMAT = "throat-seed-v1", SEED_MAX = 300;
+function parseSeed(text) {
+  let obj;
+  try { obj = JSON.parse(text); } catch (e) { return { error: "That file is not valid JSON." }; }
+  if (!obj || obj.format !== SEED_FORMAT || !Array.isArray(obj.nodes)) return { error: "That is not a Throat seed file (expected format \"" + SEED_FORMAT + "\")." };
+  if (obj.nodes.length > SEED_MAX) return { error: "Too many nodes (" + obj.nodes.length + "). The limit is " + SEED_MAX + " per file." };
+  const problems = [], seen = new Set(), items = [];
+  obj.nodes.forEach((n, i) => {
+    const where = "Node " + (i + 1) + (n && typeof n.name === "string" ? " (" + n.name.slice(0, 40) + ")" : "");
+    if (!n || typeof n !== "object") return problems.push(where + ": not an object");
+    if (typeof n.id !== "string" || !/^[0-9A-Za-z_\-]{1,64}$/.test(n.id)) return problems.push(where + ": id missing or invalid");
+    if (seen.has(n.id)) return problems.push(where + ": duplicate id " + n.id);
+    seen.add(n.id);
+    if (typeof n.type !== "string" || !TYPES[n.type]) return problems.push(where + ": unknown type \"" + n.type + "\"");
+    if (typeof n.name !== "string" || !n.name.trim() || n.name.length > LIM.name) return problems.push(where + ": name missing or over " + LIM.name + " characters");
+    const summary = n.summary == null ? "" : n.summary;
+    if (typeof summary !== "string" || summary.length > LIM.summary) return problems.push(where + ": summary is not text or is over " + LIM.summary + " characters");
+    items.push({ id: n.id, type: n.type, name: n.name, summary, exists: model.rows.has(n.id) });
+  });
+  return { items, problems };
+}
+function openImport() {
+  let items = [], running = false;
+  const fileIn = el("input", { type: "file", accept: ".json,application/json", id: "imp-file", "aria-label": "Choose a seed file" });
+  const out = el("div", { class: "imp" }, el("p", { class: "dim" }, "Choose a seed file (.json). You will see exactly what it contains before anything is saved. Nodes that already exist are skipped, so importing twice is safe."));
+  fileIn.addEventListener("change", async () => {
+    items = []; ui.btns.go.disabled = true;
+    const f = fileIn.files[0];
+    if (!f) return;
+    let text = "";
+    try { text = await f.text(); } catch (e) { out.replaceChildren(el("p", { class: "warn" }, "Could not read that file.")); return; }
+    const r = parseSeed(text);
+    if (r.error) { out.replaceChildren(el("p", { class: "warn" }, r.error)); return; }
+    items = r.items;
+    const fresh = items.filter((x) => !x.exists).length;
+    const table = el("div", { class: "imptable" });
+    for (const x of items) {
+      table.append(el("div", { class: "improw" + (x.exists ? " skip" : "") },
+        el("span", { class: "chip cin", style: "color:" + TYPES[x.type].hex }, TYPES[x.type].label),
+        el("span", { class: "in", title: x.summary.slice(0, 200) }, x.name),
+        el("small", null, x.summary.length + " chars"),
+        el("small", { class: "st" }, x.exists ? "already there, skipped" : "new")));
+    }
+    // filter(Boolean): replaceChildren would print the word "null" for a missing child
+    out.replaceChildren(...[
+      el("p", null, items.length + " nodes in the file: " + fresh + " new, " + (items.length - fresh) + " already there."),
+      r.problems.length ? el("div", { class: "warn" }, el("p", null, r.problems.length + " problem(s). These nodes will NOT be imported:"), el("ul", null, ...r.problems.slice(0, 8).map((p) => el("li", null, p)))) : null,
+      table,
+    ].filter(Boolean));
+    ui.btns.go.disabled = fresh === 0;
+  });
+  async function run() {
+    if (running) return;
+    running = true; ui.btns.go.disabled = true; fileIn.disabled = true;
+    const todo = items.filter((x) => !x.exists);
+    let made = 0, skipped = 0;
+    const failed = [], status = el("p", { role: "status" }, "");
+    out.prepend(status);
+    for (let i = 0; i < todo.length; i++) {
+      const x = todo[i];
+      status.textContent = "Importing " + (i + 1) + " of " + todo.length + ": " + x.name;
+      const r = await apiWrite("PUT", "/api/nodes/" + x.id, { data: { type: x.type, name: x.name, summary: x.summary } });
+      if (r.status === 200 && r.json && r.json.node) { model.rows.set(r.json.node.id, r.json.node); made++; }
+      else if (r.status === 409) skipped++;
+      else if (r.status === 401) { failed.push("Your sign-in ended. Sign in again in a new tab, then run the import again (nodes already imported are skipped)."); break; }
+      else failed.push(x.name + ": " + ((r.json && r.json.message) || "the server refused it"));
+    }
+    refreshAll(false);
+    if (made) { cam.dist = HOME.dist; goal.copy(centroid()); } // re-fit the view to the new nodes
+    status.textContent = "Done. " + made + " imported" + (skipped ? ", " + skipped + " already there" : "") + (failed.length ? ", " + failed.length + " failed." : ".");
+    if (failed.length) out.prepend(el("div", { class: "warn" }, el("ul", null, ...failed.map((p) => el("li", null, p)))));
+    toast(made + " node(s) imported.", failed.length > 0);
+    running = false;
+  }
+  const ui = openModal("Import nodes", el("div", null, fileIn, out), [
+    { id: "go", label: "Import", kind: "primary", onclick: run },
+    { label: "Close", kind: "quiet", onclick: () => { if (!running) closeModal(); } },
+  ], { wide: true, sticky: true });
+  ui.btns.go.disabled = true;
+}
+$("importBtn").addEventListener("click", openImport);
 
 /* ---------- labels ---------- */
 const labelPool = [];

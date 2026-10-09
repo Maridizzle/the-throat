@@ -18,7 +18,7 @@ Nothing in this file invents story content. Empty slots use TBD tokens.
 | Time scale | Ordered beats with labeled era bands. Era names are `ERA_TBD_01` style tokens until named. |
 | Timeless nodes | Outer drifting ring, linked by threads to the events they affect. |
 | Scrub strip | A flat straightened timeline along the bottom to jump around the helix. |
-| Node types | Character, Place, Rule, Thread, Open question. Shapes plus small hue shifts. |
+| Node types | Character, Place, Rule, Thread, Open question, plus Faction, Lore and Chapter (added for seeding). Each has its own shape and a tint inside the violet range. Anything else shows as Untyped. |
 | Sync | Per-node saves with a revision check. A stale save returns a conflict, never a silent overwrite. |
 | Images | Inside the node record. Up to 12 per node. Resized in the browser to 900 px on the longest side, JPEG 0.82 (same as Saintalia), plus a 200 px thumbnail and an optional caption. Server accepts only JPEG data URIs with size limits. Saintalia's "paste a URL" mode and its `prompt` field were not carried over. |
 | Conflicts | A stale save opens a side-by-side dialog (yours, theirs, and what each person changed). Fields only one person changed merge automatically. Fields both changed need an explicit choice. If both sides only added images, all images are kept. |
@@ -26,8 +26,10 @@ Nothing in this file invents story content. Empty slots use TBD tokens.
 | Hidden list | Hide and unhide from the node panel and a Hidden list. |
 | Hosting | Railway (Express and Postgres). Deployed from the GitHub repo by Maridizzle. |
 | Database guard | `REQUIRE_DATABASE=1` makes the server refuse to start without `DATABASE_URL`, so a missing database cannot silently fall back to a file that Railway wipes on redeploy. |
-| Auth | One shared password (`APP_PASSWORD`) on the whole site, for now. Writer logins come next (design to be decided). |
-| Seeding | Load THE THROAT's text as nodes using the exact words, no rewriting. Maridizzle reviews the proposed split before anything is saved. Nodes start unplaced in time. |
+| Auth | Two modes. With no `WRITER_*` variables the site uses the shared password (`APP_PASSWORD`, browser prompt). With them it uses a sign-in page, a signed cookie (30 days) and per-writer names and passwords from Railway variables, up to four writers, plus `SESSION_SECRET`. `APP_PASSWORD` stays as an emergency way in: the name `shared` on the sign-in page, or Basic Auth from tools. Failed sign-ins are rate limited (10 per 10 minutes per address and per name). |
+| Writer identity | The server stamps who saved each node, setting, hide and restore (`updated_by`) and who made each backup (`created_by`). The browser cannot fake it. Names are whatever Maridizzle sets, never invented. |
+| Presence | Other writers show as a ring and name tag in their own color on the node they are viewing, with "is editing", plus an online list and a ring on the timeline strip. Refreshes every 5 seconds and drops about 25 seconds after a tab closes. Hidden in shared-password mode. |
+| Seeding | Done as an import, not a script. THE THROAT's text was split by section into 34 nodes using the exact words (checked word for word against the source). Only formatting was cleaned: invisible characters removed, hard line wraps re-joined, bullet glyphs turned into dashes. The seven character sheets were folded into the cast nodes (blank fields left out). Nodes start untimed and unlinked. The seed file is kept out of GitHub and loaded with the Import button (preview first, skips anything already there). |
 | Removal | Hide and unhide only. Nothing is hard-deleted. |
 | Backup pruning | Off by default. Opt in with `BACKUP_KEEP`. |
 | Calm mode | Stops drift and pulses. Follows `prefers-reduced-motion`. |
@@ -43,11 +45,11 @@ Order set by Maridizzle: put it on Railway first, then writer logins, then seed 
    - 2b: story-time helix, era bands, outer ring, timeline strip.
    - 2c: node editor, side-by-side conflicts, hide and Hidden list, eras editor.
    - 2d: per-node images, lightbox, server image validation.
-   - **Not built yet:** the History screen (list of backups with a restore button; restore currently works only through the API) and writer presence rings.
-3. **Railway deploy.** Next. Checklist below. Maridizzle deploys.
-4. **Writer logins.** After the deploy. Design to be decided (separate logins, or a name per browser). Also enables presence rings and "last edited by".
-5. **Seeding.** After that. Split THE THROAT text into nodes using the exact words, review with Maridizzle, then save. Split style (by section, paragraph, or character and place) to be decided.
-6. **History screen.** Position in the order to be decided.
+   - Import: the three new types and the Import button with a preview.
+3. **Railway deploy.** Done by Maridizzle. Checklist below.
+4. **Writer logins.** Built and tested (server L1, client L2), including two real browser sessions at once. Turning it on is a Railway variable change by Maridizzle (see the checklist, step 7).
+5. **Seeding.** The seed file is built and the Import button is built and tested. Maridizzle imports it on the live site after this update is deployed, then places nodes in story time and adds links (story decisions for Maridizzle).
+6. **History screen.** Not built yet: a list of backups with who made each one and a restore button. Backups, attribution and undoable restore already work through the API. Position in the order to be decided.
 
 ## Server API (step 1)
 
@@ -57,8 +59,12 @@ Order set by Maridizzle: put it on Railway first, then writer logins, then seed 
 - `POST /api/nodes/:id/hide` and `/unhide` with `{base_rev}`
 - `PUT /api/meta/:key` with `{data, base_rev}` (era bands and shared settings)
 - `GET /api/backups`, `POST /api/backups`, `GET /api/backups/archive`, `GET /api/backups/:id`, `POST /api/backups/:id/restore`
+- `POST /api/login`, `POST /api/logout`, `GET /api/me` (writers mode)
+- `GET /api/presence`, `POST /api/presence` with `{focus, editing}`
 
-Env vars: `APP_PASSWORD` (required), `DATABASE_URL` (Railway Postgres; absent means local JSON file), `REQUIRE_DATABASE` (set to 1 on Railway), `BACKUP_KEEP` (optional), `MAX_IMAGES_PER_NODE`, `MAX_IMAGE_BYTES`, `MAX_NODE_BYTES`, `DATA_DIR`, `PORT`.
+Env vars: `APP_PASSWORD` (required in shared-password mode, emergency way in otherwise), `WRITER_1_NAME` and `WRITER_1_PASSWORD` up to `WRITER_4_*` (passwords at least 10 characters, names unique, the name `shared` is reserved), `SESSION_SECRET` (at least 24 characters, required when writers are set; changing it signs everyone out), `DATABASE_URL` (Railway Postgres; absent means local JSON file), `REQUIRE_DATABASE` (set to 1 on Railway), `BACKUP_KEEP` (optional), `MAX_IMAGES_PER_NODE`, `MAX_IMAGE_BYTES`, `MAX_NODE_BYTES`, `DATA_DIR`, `PORT`.
+
+The server refuses to start, with a clear message, on incomplete or weak writer settings.
 
 ## Railway deploy checklist
 
@@ -71,12 +77,16 @@ Vendor docs: docs.railway.com (Express guide, GitHub Autodeploys, PostgreSQL, Pu
 5. Settings, Deploy, Healthcheck Path `/api/health`.
 6. Check: logs show `DB ready.` and `THE THROAT running on`; sign in (any username, password is `APP_PASSWORD`); create a node; reload; redeploy and confirm it persists.
 
+7. Turn on writer logins: add `WRITER_1_NAME`, `WRITER_1_PASSWORD`, `WRITER_2_NAME`, `WRITER_2_PASSWORD` and `SESSION_SECRET` (a long random string) as variables, keep `APP_PASSWORD`. Never paste these into chat or commit them. The logs should then say `Sign-in mode: writers (2 writer(s))`, and the site shows the sign-in page.
+
 Railway redeploys on every push to the connected branch. Autodeploys can be paused in the service settings.
 
 ## Still open
 
 - Era names and where each seeded node sits in story time (Maridizzle decides).
-- Writer identity design, and where the History screen goes in the order.
+- Where the History screen goes in the order.
+- Presence with three or four writers was not tested (two were). Sessions cannot be revoked one by one before they expire, only all at once by changing `SESSION_SECRET`.
+- Types for a few seeded sections were best guesses and are easy to retype: How This Works, Where the Heat Lives, and both Propositions nodes.
 - Railway request-size limits are not documented in the pages checked. About 8 MB was tested locally only, not through Railway.
 - The first page load carries every node's images. Fine for dozens of images; with hundreds it would need lazy loading.
 - Not tested: touch input and pinch zoom, a real GPU, phone-width editing with images, two real browsers editing at once, three.js loading from cdnjs on a real device.

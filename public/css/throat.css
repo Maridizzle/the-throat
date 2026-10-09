@@ -109,6 +109,17 @@ button,select,input,textarea{font:inherit;color:var(--text)}
 .modal p{margin:6px 0;font-size:16px}
 .modal .dim,.dim{color:var(--muted);font-style:italic}
 .modal .bar{display:flex;gap:10px;justify-content:flex-end;flex-wrap:wrap;margin-top:16px}
+.imp{margin-top:12px}
+.imp ul{margin:6px 0 0;padding-left:18px}
+.imptable{max-height:42vh;overflow:auto;margin-top:10px;border:1px solid rgba(185,166,214,.16);border-radius:10px}
+.improw{display:grid;grid-template-columns:120px 1fr 90px 150px;gap:10px;align-items:center;padding:6px 10px;border-bottom:1px solid rgba(185,166,214,.1)}
+.improw:last-child{border-bottom:0}
+.improw.skip{opacity:.5}
+.improw .chip{font-size:10px;padding:2px 9px;border-radius:99px;border:1px solid currentColor;justify-self:start}
+.improw .in{overflow-wrap:anywhere}
+.improw small{color:var(--muted);font-size:12px;text-align:right}
+.improw .st{text-align:left}
+@media (max-width:860px){.improw{grid-template-columns:1fr auto;grid-auto-rows:auto}.improw .chip{grid-column:1 / -1}.improw small{text-align:left}}
 .hl{list-style:none;margin:0;padding:0}
 .hl li{display:flex;justify-content:space-between;align-items:center;gap:12px;padding:6px 0;border-bottom:1px solid rgba(185,166,214,.12)}
 .cgrid{display:grid;grid-template-columns:120px 1fr 1fr;gap:6px;margin-top:10px}
