@@ -125,6 +125,30 @@ button,select,input,textarea{font:inherit;color:var(--text)}
 .modal p{margin:6px 0;font-size:16px}
 .modal .dim,.dim{color:var(--muted);font-style:italic}
 .modal .bar{display:flex;gap:10px;justify-content:flex-end;flex-wrap:wrap;margin-top:16px}
+/* History */
+.hist{margin-top:10px;max-height:46vh;overflow:auto;border:1px solid rgba(185,166,214,.16);border-radius:10px}
+.hrow{display:grid;grid-template-columns:minmax(150px,1.3fr) 130px 150px 80px auto;gap:10px;align-items:center;padding:8px 12px;border-bottom:1px solid rgba(185,166,214,.1)}
+.hrow:last-child{border-bottom:0}
+.hrow strong{font-weight:600}
+.hrow small{display:block;color:var(--muted);font-size:12px}
+.hrow .hc{text-align:right}
+.hrow.undo{background:rgba(142,92,143,.14)}
+.hrow button,.pvrow button,.pvbox button{background:rgba(11,7,20,.7);border:1px solid rgba(185,166,214,.3);border-radius:8px;padding:4px 12px;cursor:pointer}
+.hrow button:hover,.pvrow button:hover,.pvbox button:hover:not(:disabled){border-color:var(--thistle);box-shadow:0 0 12px rgba(185,166,214,.35)}
+.pv h3{margin:16px 0 6px;font-family:"Cinzel",Georgia,serif;font-weight:500;letter-spacing:.12em;text-transform:uppercase;font-size:12px;color:var(--thistle)}
+.pv .sum{margin:6px 0}
+.pvrow{padding:8px 10px;border:1px solid rgba(185,166,214,.14);border-radius:10px;background:rgba(11,7,20,.45);margin-top:8px}
+.pvrow .top{display:flex;gap:10px;align-items:center;justify-content:space-between}
+.pvrow .cn{overflow-wrap:anywhere}
+.pvrow .chips{margin-top:3px;display:flex;flex-wrap:wrap;gap:5px}
+.pvrow .chips span{font-size:11px;padding:1px 8px;border-radius:99px;border:1px solid rgba(185,166,214,.4);color:var(--muted)}
+.pvrow summary{cursor:pointer;color:var(--muted);font-size:14px;margin-top:6px}
+.pvrow .cgrid{grid-template-columns:110px 1fr 1fr;margin-top:6px}
+.pvnames{margin:6px 0 0;padding-left:18px;max-height:140px;overflow:auto}
+.pvbox{margin-top:16px;padding:12px 14px;border-radius:12px;border:1px solid #C48CB8;background:rgba(142,92,143,.14)}
+.pvbox input[type=text]{background:rgba(11,7,20,.75);border:1px solid rgba(185,166,214,.35);border-radius:8px;padding:6px 10px;width:150px;margin-right:8px}
+.pvbox button:disabled{opacity:.4;cursor:not-allowed}
+@media (max-width:860px){.hrow{grid-template-columns:1fr auto}.hrow .hc{text-align:left}.pvrow .top{flex-direction:column;align-items:flex-start}.pvrow .cgrid{grid-template-columns:1fr 1fr}.pvrow .cgrid .ch:first-child{display:none}.pvrow .cgrid .cl{grid-column:1 / -1}}
 .imp{margin-top:12px}
 .imp ul{margin:6px 0 0;padding-left:18px}
 .imptable{max-height:42vh;overflow:auto;margin-top:10px;border:1px solid rgba(185,166,214,.16);border-radius:10px}

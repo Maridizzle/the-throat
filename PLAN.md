@@ -54,7 +54,7 @@ Order set by Maridizzle: put it on Railway first, then writer logins, then seed 
 3. **Railway deploy.** Done by Maridizzle. Checklist below.
 4. **Writer logins.** Built and tested (server L1, client L2), including two real browser sessions at once. Turning it on is a Railway variable change by Maridizzle (see the checklist, step 7).
 5. **Seeding.** Done. The 34 sections were imported on the live site (Maridizzle confirmed it worked). What remains is Maridizzle's: placing nodes in story time, adding links, and retyping any seeded node whose type was a best guess.
-6. **History screen.** Not built yet: a list of backups with who made each one and a restore button. Backups, attribution and undoable restore already work through the API. Position in the order to be decided.
+6. **History screen.** Built and tested on throwaway local data. A History button opens a list of every backup, newest first (when, why, who, node count), with Back up now. Preview compares a backup with the site right now (identical, changed, created since, eras) with a per-node differences view. Restore this version restores one node: a safety backup first, then the normal conflict-safe save. Restore the whole map needs the typed word RESTORE, first saves a "Before a restore" backup (the undo point), and hides nodes made since, never erasing them. Both restores refuse while a node editor is open, and the whole-map restore refuses if the map changed while the preview was open. Tested: list, Back up now, preview counts, markup shown as text, wrong and right typed word, node restore, whole-map restore, undo through the "Before a restore" backup, phone width, no page errors. Not tested: the changed-while-reading guard, the open-editor guard, the signed-out (401) message, writers mode with real sign-ins, Postgres.
 
 ## Server API (step 1)
 
@@ -89,7 +89,6 @@ Railway redeploys on every push to the connected branch. Autodeploys can be paus
 ## Still open
 
 - Era names and where each seeded node sits in story time (Maridizzle decides).
-- Where the History screen goes in the order.
 - Presence with three or four writers was not tested (two were). Sessions cannot be revoked one by one before they expire, only all at once by changing `SESSION_SECRET`.
 - Types for a few seeded sections were best guesses and are easy to retype: How This Works, Where the Heat Lives, and both Propositions nodes.
 - Railway request-size limits are not documented in the pages checked. About 8 MB was tested locally only, not through Railway.

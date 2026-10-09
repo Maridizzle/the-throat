@@ -594,6 +594,16 @@ async function apiWrite(method, url, body) {
     return { status: 0, json: null };
   }
 }
+async function apiRead(url) {
+  try {
+    const r = await fetch(url, { headers: { Accept: "application/json" } });
+    let json = null;
+    try { json = await r.json(); } catch (e) { /* no body */ }
+    return { status: r.status, json };
+  } catch (e) {
+    return { status: 0, json: null };
+  }
+}
 let toastTimer = 0;
 function toast(msg, bad) {
   const t = $("toast");
@@ -1229,6 +1239,152 @@ function openExport() {
   ], { wide: true });
 }
 $("exportBtn").addEventListener("click", openExport);
+
+/* history: list the backups, preview one against the site right now, and restore either one
+ * node or the whole map. Everything goes through the server's existing, tested backup and save
+ * calls. A backup of the current state is always made first, and nothing is ever erased. */
+const REASON_LABEL = { periodic: "Automatic", before_hide: "Before a hide", before_restore: "Before a restore", manual: "Made by hand" };
+const backupWhen = (iso) => { const d = new Date(iso); return isFinite(d) ? d.toLocaleString([], { dateStyle: "medium", timeStyle: "short" }) : String(iso); };
+function planMessage(r, what) {
+  if (r.status === 401) return "Your sign-in ended. Sign in again in a new tab, then try again. Nothing was changed.";
+  if (r.status === 404) return "That backup no longer exists. Nothing was changed.";
+  if (r.status === 0) return "Could not reach the server. Nothing was changed.";
+  return "The server could not " + what + " (error " + r.status + "). Nothing was changed.";
+}
+async function openHistory() {
+  const list = el("div", { class: "hist" }, el("p", { class: "dim", style: "padding:10px 12px;margin:0" }, "Loading backups..."));
+  const status = el("p", { role: "status", class: "dim" }, "");
+  const ui = openModal("History", el("div", null,
+    el("p", null, "Every backup of the whole map, newest first. Preview one to see exactly how it differs from the site right now before anything can be restored. Nothing here changes the story until you confirm."),
+    list, status), [
+    { id: "now", label: "Back up now", kind: "primary", onclick: async () => {
+      ui.btns.now.disabled = true; status.textContent = "Making a backup...";
+      const r = await apiWrite("POST", "/api/backups", {});
+      if (r.status === 200) { status.textContent = "Backup saved."; await fill(); }
+      else status.textContent = planMessage(r, "make a backup");
+      ui.btns.now.disabled = false;
+    } },
+    { label: "Close", kind: "quiet", onclick: closeModal },
+  ], { wide: true });
+  async function fill() {
+    const r = await apiRead("/api/backups");
+    if (r.status !== 200 || !r.json) { list.replaceChildren(el("p", { class: "warn", style: "margin:8px" }, planMessage(r, "load the backups"))); return; }
+    const rows = r.json.backups || [];
+    if (!rows.length) { list.replaceChildren(el("p", { class: "dim", style: "padding:10px 12px;margin:0" }, "No backups yet. One is made automatically the first time something is saved after ten quiet minutes, or press Back up now.")); return; }
+    list.replaceChildren(...rows.slice(0, 200).map((b) => el("div", { class: "hrow" + (b.reason === "before_restore" ? " undo" : "") },
+      el("div", null, el("strong", null, backupWhen(b.created_at)), el("small", null, relTime(b.created_at) + (b.reason === "before_restore" ? ", use it to undo a restore" : ""))),
+      el("div", null, REASON_LABEL[b.reason] || b.reason),
+      el("div", null, byName(b.created_by) || ""),
+      el("small", { class: "hc" }, b.node_count + " nodes"),
+      el("button", { type: "button", "aria-label": "Preview the backup from " + backupWhen(b.created_at), onclick: () => openPreview(b) }, "Preview"))));
+    if (rows.length > 200) list.append(el("p", { class: "dim", style: "padding:8px 12px;margin:0" }, "Showing the newest 200 of " + rows.length + " backups."));
+  }
+  fill();
+}
+// How a backup differs from the site right now. Nothing is ever erased, so every backed-up node still exists.
+function diffAgainst(snap) {
+  const snapIds = new Set(snap.nodes.map((n) => n.id));
+  const changed = [], created = [];
+  let same = 0;
+  for (const n of snap.nodes) {
+    const row = model.rows.get(n.id);
+    if (!row) continue;
+    const a = fieldsOf(n.data || {}), b = fieldsOf(row.data || {});
+    const fields = FIELDS.filter((f) => a[f] !== b[f]);
+    const hid = !!n.hidden !== !!row.hidden;
+    if (fields.length || hid) changed.push({ id: n.id, then: n, now: row, fields, hid }); else same++;
+  }
+  for (const row of model.rows.values()) if (!snapIds.has(row.id)) created.push(row);
+  const eras = (d) => JSON.stringify((d && Array.isArray(d.eras) ? d.eras : []).map((e) => [String(e.id), String(e.name || "")]));
+  const sEras = (snap.meta || []).find((m) => m.key === "eras"), cEras = model.meta.get("eras");
+  return { same, changed, created, erasChanged: eras(sEras && sEras.data) !== eras(cEras && cEras.data) };
+}
+const diffSig = (d) => JSON.stringify([d.changed.map((c) => [c.id, c.now.rev]), d.created.map((r) => [r.id, r.rev]), d.erasChanged]);
+const nodeNameOf = (data, fallback) => String((data && data.name) || fallback);
+async function openPreview(b) {
+  const wrap = el("div", null, el("p", { class: "dim" }, "Loading this backup..."));
+  openModal("Backup from " + backupWhen(b.created_at), wrap, [
+    { label: "Back to the list", kind: "quiet", onclick: openHistory },
+    { label: "Close", kind: "quiet", onclick: closeModal },
+  ], { wide: true });
+  const r = await apiRead("/api/backups/" + encodeURIComponent(b.id));
+  if (r.status !== 200 || !r.json || !r.json.data || !Array.isArray(r.json.data.nodes)) { wrap.replaceChildren(el("p", { class: "warn" }, planMessage(r, "load that backup"))); return; }
+  const snap = r.json.data;
+  let shown = null; // signature of what the person is looking at, to catch the map changing under them
+  const render = (note) => {
+    const d = diffAgainst(snap);
+    shown = diffSig(d);
+    const parts = [];
+    if (note) parts.push(el("p", { class: "warn" }, note));
+    parts.push(el("p", { class: "sum" }, "Made " + backupWhen(b.created_at) + " (" + (REASON_LABEL[b.reason] || b.reason) + (byName(b.created_by) ? ", by " + byName(b.created_by) : "") + "). It holds " + snap.nodes.length + " nodes."));
+    parts.push(el("p", { class: "sum" }, "Compared with the site right now: " + d.same + " identical, " + d.changed.length + " changed since, " + d.created.length + " created since" + (d.erasChanged ? ", and the eras differ." : ".")));
+    parts.push(el("h3", null, "Changed since this backup (" + d.changed.length + ")"));
+    if (!d.changed.length) parts.push(el("p", { class: "dim" }, "None. Every node in this backup matches the site right now."));
+    for (const c of d.changed) {
+      const grid = el("div", { class: "cgrid" }, el("div", { class: "ch" }, "Field"), el("div", { class: "ch" }, "In this backup"), el("div", { class: "ch" }, "Right now"));
+      for (const f of c.fields) grid.append(el("div", { class: "cl" }, FIELD_LABEL[f]), el("div", { class: "cc" }, fieldDisplay(f, c.then.data || {})), el("div", { class: "cc" }, fieldDisplay(f, c.now.data || {})));
+      if (c.hid) grid.append(el("div", { class: "cl" }, "Hidden"), el("div", { class: "cc" }, c.then.hidden ? "Hidden" : "Visible"), el("div", { class: "cc" }, c.now.hidden ? "Hidden" : "Visible"));
+      const thenName = nodeNameOf(c.then.data, c.id), nowName = nodeNameOf(c.now.data, c.id);
+      parts.push(el("div", { class: "pvrow" },
+        el("div", { class: "top" },
+          el("div", { class: "cn" }, nowName + (thenName !== nowName ? " (was \"" + thenName + "\")" : ""),
+            el("div", { class: "chips" }, ...c.fields.map((f) => el("span", null, FIELD_LABEL[f])), c.hid ? el("span", null, "Hidden state") : null)),
+          el("button", { type: "button", "aria-label": "Restore " + nowName + " to this backup's version", onclick: () => restoreOneNode(b, snap, c, render) }, "Restore this version")),
+        el("details", null, el("summary", null, "Show the differences"), grid)));
+    }
+    parts.push(el("h3", null, "Created since this backup (" + d.created.length + ")"));
+    if (!d.created.length) parts.push(el("p", { class: "dim" }, "None."));
+    else parts.push(el("ul", { class: "pvnames" }, ...d.created.map((row) => el("li", null, nodeNameOf(row.data, row.id) + (row.hidden ? " (hidden)" : "")))));
+    // whole-map restore, behind a typed word
+    const input = el("input", { type: "text", id: "restore-word", "aria-label": "Type RESTORE to confirm", autocomplete: "off", placeholder: "RESTORE" });
+    const go = el("button", { type: "button", disabled: "" }, "Restore the whole map");
+    input.addEventListener("input", () => { go.disabled = input.value !== "RESTORE"; });
+    go.addEventListener("click", () => restoreWholeMap(b, snap, shown, render));
+    parts.push(el("div", { class: "pvbox" },
+      el("strong", null, "Restore the whole map to this backup"),
+      el("p", { class: "sum" }, "This puts " + d.changed.length + " changed node(s) back to the version in this backup" + (d.erasChanged ? ", restores the eras," : "") + " and hides " + d.created.length + " node(s) created since (hidden, never erased)."),
+      el("p", { class: "sum" }, "A backup of the site right now is made first, labeled \"Before a restore\", so you can undo this from the History list."),
+      el("p", { class: "sum" }, "To go ahead, type RESTORE:"), input, go));
+    wrap.replaceChildren(...parts);
+  };
+  render("");
+}
+async function restoreOneNode(b, snap, c, rerender) {
+  if (editing) { toast("Finish or cancel your open edit first, then try again.", true); return; }
+  const cur = model.rows.get(c.id), name = nodeNameOf(c.now.data, c.id);
+  if (!cur) return;
+  if (!confirm("Restore \"" + name + "\" to the version from " + backupWhen(b.created_at) + "?\n\nA backup of the site right now is made first, so its current version is kept.")) return;
+  const safe = await apiWrite("POST", "/api/backups", {});
+  if (safe.status !== 200) { toast("Could not make the safety backup first, so nothing was changed.", true); return; }
+  const r1 = await apiWrite("PUT", "/api/nodes/" + c.id, { data: deepCopy(c.then.data || {}), base_rev: cur.rev });
+  if (r1.status === 409 && r1.json && r1.json.current) { model.rows.set(c.id, r1.json.current); refreshAll(false); toast("Someone changed this node first. The preview was refreshed. Review it and try again.", true); rerender(""); return; }
+  if (r1.status !== 200 || !r1.json || !r1.json.node) { writeFailure(r1); return; }
+  model.rows.set(c.id, r1.json.node);
+  if (!!c.then.hidden !== !!r1.json.node.hidden) { // its hidden state comes back too
+    const r2 = await apiWrite("POST", "/api/nodes/" + c.id + (c.then.hidden ? "/hide" : "/unhide"), { base_rev: r1.json.node.rev });
+    if (r2.status === 200 && r2.json && r2.json.node) model.rows.set(c.id, r2.json.node);
+    else toast("The text came back, but its hidden state could not be changed. Nothing was lost.", true);
+  }
+  refreshAll(false);
+  toast("Restored \"" + name + "\" from the backup.");
+  rerender("");
+}
+async function restoreWholeMap(b, snap, shownSig, rerender) {
+  if (editing) { toast("Finish or cancel your open edit first, then try again.", true); return; }
+  if (diffSig(diffAgainst(snap)) !== shownSig) { rerender("The map changed while you were reading. Please review the new comparison, then type RESTORE again. Nothing was restored."); return; }
+  const r = await apiWrite("POST", "/api/backups/" + encodeURIComponent(b.id) + "/restore", {});
+  if (r.status !== 200 || !r.json || !r.json.state) { toast(planMessage(r, "restore"), true); return; }
+  applyState(r.json.state);
+  refreshAll(false);
+  openModal("Restored", el("div", null,
+    el("p", null, "The whole map is back to the backup from " + backupWhen(b.created_at) + "."),
+    el("p", { class: "dim" }, "Nothing was erased. Nodes created after that backup are hidden (see the Hidden list). A backup of how things were just before is saved as \"Before a restore\". To undo this, open History, preview that backup, and restore it.")), [
+    { label: "Open History", kind: "primary", onclick: openHistory },
+    { label: "Close", kind: "quiet", onclick: closeModal },
+  ]);
+  toast("Restored.");
+}
+$("historyBtn").addEventListener("click", openHistory);
 
 /* ---------- labels ---------- */
 const labelPool = [];
