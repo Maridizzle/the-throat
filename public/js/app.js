@@ -454,6 +454,7 @@ function showDetail() {
     el("h2", null, n.name),
     el("div", { class: "f" }, "Summary"),
     n.summary ? el("p", null, n.summary) : el("p", { class: "dim" }, "No summary yet."),
+    imagesBlock(n),
     el("div", { class: "f" }, "Story time"),
     n.u == null ? el("p", { class: "dim" }, "No story time yet (outer ring)") : el("p", null, whenText(n)),
     el("div", { class: "f" }, "Connected to (" + nb.length + ")"),
@@ -575,8 +576,12 @@ addEventListener("keydown", (e) => {
 });
 
 /* field helpers shared by the editor and the conflict dialog */
-const FIELDS = ["type", "name", "summary", "time", "links"];
-const FIELD_LABEL = { type: "Type", name: "Name", summary: "Summary", time: "Story time", links: "Links from this node" };
+const FIELDS = ["type", "name", "summary", "time", "links", "images"];
+const FIELD_LABEL = { type: "Type", name: "Name", summary: "Summary", time: "Story time", links: "Links from this node", images: "Images" };
+const MAX_IMAGES = 12, IMG_MAX_DIM = 900, THUMB_DIM = 200, JPEG_PREFIX = "data:image/jpeg;base64,";
+// Only inline JPEG data URIs are ever shown. Anything else in stored data is ignored.
+const safeJpeg = (s) => typeof s === "string" && s.startsWith(JPEG_PREFIX);
+const imagesOf = (d) => (Array.isArray(d.images) ? d.images.filter((i) => i && i.id && safeJpeg(i.src)) : []);
 const eraList = () => {
   const em = model.meta.get("eras");
   return em && em.data && Array.isArray(em.data.eras) ? em.data.eras.filter((e) => e && e.id != null) : [];
@@ -589,11 +594,13 @@ function fieldsOf(d) {
     summary: String(d.summary || ""),
     time: hasTime(d) ? JSON.stringify({ era: d.time.era == null ? null : String(d.time.era), order: Number.isFinite(d.time.order) ? d.time.order : null }) : "",
     links: JSON.stringify((Array.isArray(d.links) ? d.links : []).filter((l) => l && l.to).map((l) => [String(l.to), String(l.label || "")]).sort()),
+    images: JSON.stringify(imagesOf(d).map((i) => [String(i.id), String(i.caption || "")])),
   };
 }
 function setField(target, f, src) {
   if (f === "time") { if (hasTime(src)) target.time = deepCopy(src.time); else delete target.time; }
   else if (f === "links") target.links = deepCopy(Array.isArray(src.links) ? src.links : []);
+  else if (f === "images") { if (Array.isArray(src.images) && src.images.length) target.images = deepCopy(src.images); else delete target.images; }
   else if (src[f] === undefined) delete target[f];
   else target[f] = src[f];
 }
@@ -614,11 +621,73 @@ function fieldDisplay(f, d) {
     if (Number.isFinite(d.time.order)) parts.push("order " + d.time.order);
     return el("span", null, parts.join(", "));
   }
+  if (f === "images") {
+    const ims = imagesOf(d);
+    if (!ims.length) return el("span", { class: "dim" }, "(none)");
+    const row = el("div", { class: "thumbrow" });
+    for (const im of ims) row.append(el("img", { src: safeJpeg(im.thumb) ? im.thumb : im.src, alt: im.caption || "", title: im.caption || "" }));
+    return el("div", null, row, el("small", null, ims.length + (ims.length === 1 ? " image" : " images")));
+  }
   const ls = (Array.isArray(d.links) ? d.links : []).filter((l) => l && l.to);
   if (!ls.length) return el("span", { class: "dim" }, "(none)");
   const ul = el("ul");
   for (const l of ls) ul.append(el("li", null, nodeNameById(String(l.to)), l.label ? " (" + l.label + ")" : ""));
   return ul;
+}
+
+/* images: resized in the browser, stored inline as JPEG data URIs */
+async function decodeImage(file) {
+  try { return await createImageBitmap(file, { imageOrientation: "from-image" }); }
+  catch (e) {
+    const url = URL.createObjectURL(file);
+    try {
+      const im = new Image();
+      im.src = url;
+      await im.decode();
+      return im;
+    } finally { URL.revokeObjectURL(url); }
+  }
+}
+function encodeJpeg(src, maxDim, quality) {
+  let w = src.width, h = src.height;
+  if (w > maxDim || h > maxDim) { if (w > h) { h = Math.round(h * maxDim / w); w = maxDim; } else { w = Math.round(w * maxDim / h); h = maxDim; } }
+  const c = document.createElement("canvas");
+  c.width = Math.max(1, w); c.height = Math.max(1, h);
+  const x = c.getContext("2d");
+  x.fillStyle = "#1A0F26"; x.fillRect(0, 0, c.width, c.height); // flatten transparency onto the plum field
+  x.drawImage(src, 0, 0, c.width, c.height);
+  return c.toDataURL("image/jpeg", quality);
+}
+async function processImageFile(file) {
+  if (!/^image\//.test(file.type)) throw new Error("not an image");
+  const src = await decodeImage(file);
+  let full = encodeJpeg(src, IMG_MAX_DIM, .82);
+  if (full.length > 1.2 * 1024 * 1024) full = encodeJpeg(src, 720, .7); // keep well under the server cap
+  const thumb = encodeJpeg(src, THUMB_DIM, .7);
+  if (src.close) src.close();
+  if (!safeJpeg(full)) throw new Error("could not encode");
+  return { id: uid("i_"), src: full, thumb, caption: "", createdAt: Date.now() };
+}
+function imagesBlock(n) {
+  const ims = imagesOf(n.raw);
+  if (!ims.length) return null;
+  const row = el("div", { class: "thumbrow big" });
+  ims.forEach((im, i) => row.append(el("button", { type: "button", class: "tb", "aria-label": "View image " + (i + 1) + (im.caption ? ": " + im.caption : ""), onclick: () => openLightbox(ims, i) },
+    el("img", { src: safeJpeg(im.thumb) ? im.thumb : im.src, alt: im.caption || "" }))));
+  return el("div", null, el("div", { class: "f" }, "Images (" + ims.length + ")"), row);
+}
+function openLightbox(ims, start) {
+  let i = start;
+  const img = el("img", { class: "lbimg", alt: "" }), cap = el("p", { class: "lbcap" }), cnt = el("small", null, "");
+  const show = () => { const im = ims[i]; img.src = im.src; img.alt = im.caption || ""; cap.textContent = im.caption || ""; cnt.textContent = (i + 1) + " of " + ims.length; };
+  const step = (d) => { i = (i + d + ims.length) % ims.length; show(); };
+  const onKey = (e) => { if (e.key === "ArrowLeft") step(-1); else if (e.key === "ArrowRight") step(1); };
+  const btns = [];
+  if (ims.length > 1) btns.push({ label: "Previous", kind: "quiet", onclick: () => step(-1) }, { label: "Next", kind: "quiet", onclick: () => step(1) });
+  btns.push({ label: "Close", kind: "quiet", onclick: closeModal });
+  addEventListener("keydown", onKey);
+  openModal("Image", el("div", { class: "lbbox" }, img, cap, cnt), btns, { wide: true, onClose: () => removeEventListener("keydown", onKey) });
+  show();
 }
 
 /* node editor */
@@ -627,6 +696,7 @@ function startEdit(n) {
   if (editing && !confirmDiscard()) return;
   const row = n && model.rows.get(n.id);
   editing = { id: n ? n.id : uid("n_"), isNew: !n, baseRev: row ? row.rev : null, base: row ? deepCopy(row.data || {}) : {} };
+  editing.imgs = deepCopy(imagesOf(editing.base)); // working copy of the images while editing
   if (!n) { selectedId = null; refreshLinkEmphasis(); }
   renderEditor();
 }
@@ -665,6 +735,35 @@ function renderEditor() {
     linksBox.append(row);
   };
   for (const l of Array.isArray(base.links) ? base.links : []) if (l && l.to) addLinkRow(String(l.to), String(l.label || ""));
+  const imgBox = el("div", { id: "f-images", class: "thumbs" });
+  const fileIn = el("input", { type: "file", accept: "image/*", multiple: "", hidden: "", id: "f-file", "aria-label": "Choose images to add" });
+  const addBtn = el("button", { type: "button", class: "quiet", id: "f-addimg", onclick: () => fileIn.click() }, "Add images");
+  const imgNote = el("small", { class: "hint" }, "");
+  const drawImgs = () => {
+    imgBox.replaceChildren();
+    editing.imgs.forEach((im, i) => {
+      const cap = el("input", { type: "text", maxlength: 500, placeholder: "caption (optional)", "aria-label": "Caption for image " + (i + 1) });
+      cap.value = im.caption || "";
+      cap.addEventListener("input", () => { im.caption = cap.value; });
+      imgBox.append(el("div", { class: "th" },
+        el("img", { src: safeJpeg(im.thumb) ? im.thumb : im.src, alt: im.caption || "Image " + (i + 1) }),
+        cap,
+        el("button", { type: "button", class: "quiet", "aria-label": "Remove image " + (i + 1), onclick: () => { editing.imgs.splice(i, 1); drawImgs(); } }, "Remove")));
+    });
+    addBtn.disabled = editing.imgs.length >= MAX_IMAGES;
+    imgNote.textContent = editing.imgs.length + " of " + MAX_IMAGES + " images. JPEG, resized to " + IMG_MAX_DIM + " px on the longest side. Removing an image here only removes it from this version; backups keep earlier versions.";
+  };
+  fileIn.addEventListener("change", async () => {
+    const files = [...fileIn.files]; fileIn.value = "";
+    addBtn.disabled = true; imgNote.textContent = "Adding images...";
+    for (const f of files) {
+      if (editing.imgs.length >= MAX_IMAGES) { toast("Up to " + MAX_IMAGES + " images per node.", true); break; }
+      try { editing.imgs.push(await processImageFile(f)); }
+      catch (e) { toast("Could not read \"" + f.name + "\" as an image.", true); }
+    }
+    drawImgs();
+  });
+  drawImgs();
   const fld = (label, ctl, hint) => el("div", { class: "fld" }, el("label", { for: ctl.id }, label), ctl, hint ? el("small", null, hint) : null);
   d.replaceChildren(
     el("h2", null, editing.isNew ? "New node" : "Edit node"),
@@ -677,6 +776,8 @@ function renderEditor() {
     linksBox,
     el("button", { type: "button", class: "quiet", onclick: () => addLinkRow("", "") }, "Add a link"),
     el("small", { class: "hint" }, "Links from other nodes are edited on those nodes."),
+    el("div", { class: "f" }, "Images"),
+    imgBox, addBtn, fileIn, imgNote,
     el("div", { class: "acts" },
       el("button", { type: "button", id: "f-save", onclick: saveEdit }, "Save"),
       el("button", { type: "button", class: "quiet", onclick: cancelEdit }, "Cancel")));
@@ -702,6 +803,8 @@ function collectForm(strict) {
     seen.add(to + "|" + label); links.push(label ? { to, label } : { to });
   }
   data.links = links;
+  if (editing.imgs.length || Array.isArray(editing.base.images)) data.images = deepCopy(editing.imgs);
+  if (strict && JSON.stringify(data).length > 7.5 * 1024 * 1024) { toast("This node is too large to save. Remove an image or two.", true); return null; }
   return data;
 }
 function editingDirty() {
@@ -746,7 +849,15 @@ function showConflict(ed, mine, current) {
   const diff = FIELDS.filter((f) => m[f] !== t[f]);
   const choice = {};
   for (const f of diff) { if (m[f] === b[f]) choice[f] = "theirs"; else if (t[f] === b[f]) choice[f] = "mine"; }
-  const real = diff.filter((f) => m[f] !== b[f] && t[f] !== b[f]);
+  // If both sides only ADDED images (nothing removed or re-captioned), keep everyone's images.
+  const combine = new Set();
+  if (diff.includes("images") && m.images !== b.images && t.images !== b.images) {
+    const untouched = (d) => { const cap = new Map(imagesOf(d).map((i) => [i.id, i.caption || ""])); return imagesOf(ed.base).every((i) => cap.has(i.id) && cap.get(i.id) === (i.caption || "")); };
+    if (untouched(mine) && untouched(current.data || {})) { combine.add("images"); choice.images = "combine"; }
+  }
+  const baseImgIds = new Set(imagesOf(ed.base).map((i) => i.id));
+  const mineNew = () => imagesOf(mine).filter((i) => !baseImgIds.has(i.id));
+  const real = diff.filter((f) => m[f] !== b[f] && t[f] !== b[f] && !combine.has(f));
   const body = el("div");
   body.append(el("p", { class: "dim" },
     "Someone saved this node while you were editing. " + (real.length ? real.length + " field(s) were changed by both of you, so you must choose. " : "You changed different fields, so both sets of changes can be kept. ") +
@@ -765,6 +876,13 @@ function showConflict(ed, mine, current) {
       grid.append(el("div", { class: "cc same" }, fieldDisplay(f, mine), el("small", null, "Same in both")), el("div", { class: "cc same" }, fieldDisplay(f, current.data || {})));
       continue;
     }
+    if (combine.has(f)) {
+      grid.append(el("div", { class: "cc same wide" }, el("div", null,
+        fieldDisplay("images", { images: [...imagesOf(current.data || {}), ...mineNew()] }),
+        el("small", null, "Both of you added images. All of them are kept."))));
+      cells[f] = [];
+      continue;
+    }
     const mk = (who, data) => {
       const rb = el("input", { type: "radio", name: "c-" + f, "aria-label": FIELD_LABEL[f] + ": keep " + who });
       rb.checked = choice[f] === who;
@@ -777,12 +895,15 @@ function showConflict(ed, mine, current) {
     grid.append(cm, ct);
   }
   body.append(grid);
-  const setAll = (who) => { for (const f of diff) { choice[f] = who; for (const rb of grid.querySelectorAll('input[name="c-' + f + '"]')) rb.checked = (rb.getAttribute("aria-label").endsWith("keep " + who)); } refresh(); };
+  const setAll = (who) => { for (const f of diff) { if (combine.has(f)) continue; choice[f] = who; for (const rb of grid.querySelectorAll('input[name="c-' + f + '"]')) rb.checked = (rb.getAttribute("aria-label").endsWith("keep " + who)); } refresh(); };
   const ui = openModal("Two versions of this node", body, [
     { id: "apply", label: "Apply and save", kind: "primary", onclick: async () => {
       const result = deepCopy(current.data || {});
       let usesMine = false;
-      for (const f of diff) if (choice[f] === "mine") { setField(result, f, mine); usesMine = true; }
+      for (const f of diff) {
+        if (choice[f] === "mine") { setField(result, f, mine); usesMine = true; }
+        else if (choice[f] === "combine") { result.images = deepCopy([...(Array.isArray(result.images) ? result.images : []), ...mineNew()]); usesMine = true; }
+      }
       closeModal();
       if (!usesMine) {
         model.rows.set(current.id, current); editing = null; refreshAll(false); select(current.id); toast("Kept the latest version. Your edits were not saved.");

@@ -20,6 +20,8 @@ const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, ".data");
 const BACKUP_DIR = path.join(DATA_DIR, "backups");
 const MAX_IMAGES = Number(process.env.MAX_IMAGES_PER_NODE) || 12;
 const MAX_NODE_BYTES = Number(process.env.MAX_NODE_BYTES) || 8 * 1024 * 1024;
+const MAX_IMAGE_BYTES = Number(process.env.MAX_IMAGE_BYTES) || 1.5 * 1024 * 1024;
+const MAX_THUMB_BYTES = 200 * 1024;
 const BACKUP_PERIOD_MS = 10 * 60 * 1000;
 // 0 means never prune. Pruning old snapshots deletes data, so it is opt-in.
 const BACKUP_KEEP = Number(process.env.BACKUP_KEEP) || 0;
@@ -60,11 +62,36 @@ app.use(express.json({ limit: "12mb" }));
 app.use(express.static(path.join(__dirname, "public")));
 
 // ── Validation ───────────────────────────────────────────
+// Images are stored inline as JPEG data URIs. Only that shape is accepted, so a
+// stored record can never point the page at a script or an outside address.
+const JPEG_URI = "data:image/jpeg;base64,";
+const B64_RE = /^[A-Za-z0-9+/]+=*$/;
+function checkImages(images) {
+  if (!Array.isArray(images)) return "images must be an array";
+  if (images.length > MAX_IMAGES) return "too many images (max " + MAX_IMAGES + ")";
+  const ids = new Set();
+  for (const img of images) {
+    if (!img || typeof img !== "object" || Array.isArray(img)) return "each image must be an object";
+    if (typeof img.id !== "string" || !ID_RE.test(img.id)) return "image id is missing or invalid";
+    if (ids.has(img.id)) return "duplicate image id";
+    ids.add(img.id);
+    for (const [key, cap] of [["src", MAX_IMAGE_BYTES], ["thumb", MAX_THUMB_BYTES]]) {
+      const v = img[key];
+      if (v === undefined && key === "thumb") continue;
+      if (typeof v !== "string" || !v.startsWith(JPEG_URI)) return "image " + key + " must be a JPEG data URI";
+      if (v.length > cap) return "image " + key + " is too large";
+      if (!B64_RE.test(v.slice(JPEG_URI.length))) return "image " + key + " is not valid base64";
+    }
+    if (img.caption !== undefined && (typeof img.caption !== "string" || img.caption.length > 500)) return "image caption must be text of at most 500 characters";
+    if (img.createdAt !== undefined && !Number.isFinite(img.createdAt)) return "image createdAt must be a number";
+  }
+  return null;
+}
 function checkNodeData(data) {
   if (!data || typeof data !== "object" || Array.isArray(data)) return "data must be an object";
   if (data.images !== undefined) {
-    if (!Array.isArray(data.images)) return "images must be an array";
-    if (data.images.length > MAX_IMAGES) return "too many images (max " + MAX_IMAGES + ")";
+    const bad = checkImages(data.images);
+    if (bad) return bad;
   }
   if (Buffer.byteLength(JSON.stringify(data)) > MAX_NODE_BYTES) return "node too large";
   return null;
