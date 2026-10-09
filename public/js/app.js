@@ -781,6 +781,7 @@ function openLightbox(ims, start) {
 /* node editor */
 const confirmDiscard = () => !editingDirty() || confirm("Discard your unsaved changes to this node?");
 function startEdit(n) {
+  if (chat.open) chatToggle(false); // the editor lives in the node panel, which the chat hides
   if (editing && !confirmDiscard()) return;
   const row = n && model.rows.get(n.id);
   editing = { id: n ? n.id : uid("n_"), isNew: !n, baseRev: row ? row.rev : null, base: row ? deepCopy(row.data || {}) : {} };
@@ -1454,6 +1455,7 @@ const chatStatus = el("p", { class: "cstat dim", role: "status" });
 const chatTray = el("div", { class: "ctray" });
 const chatModes = el("div", { class: "cmodes", role: "group", "aria-label": "Which AI to use" });
 const chatSendBtn = el("button", { type: "button", class: "primary", onclick: () => chatSend() }, "Send");
+const chatProposeBtn = el("button", { type: "button", onclick: () => chatPropose() }, "Propose changes");
 const chatAddSel = el("button", { type: "button", onclick: () => chatAdd(selectedId) }, "Add selected node");
 const chatEl = el("aside", { class: "panel", id: "chat", hidden: "", "aria-label": "Story chat" },
   el("div", { class: "chead" }, el("h2", null, "Story chat"), el("button", { type: "button", class: "cx", "aria-label": "Close the chat", onclick: () => chatToggle(false) }, "×")),
@@ -1461,7 +1463,8 @@ const chatEl = el("aside", { class: "panel", id: "chat", hidden: "", "aria-label
   el("div", { class: "cf" }, "The AI can see"), chatTray,
   el("div", { class: "cacts" }, chatAddSel, el("button", { type: "button", onclick: chatAddAll }, "Add whole map...")),
   chatLog,
-  el("div", { class: "ccomp" }, chatIn, chatSize, el("div", { class: "cacts" }, chatSendBtn, el("button", { type: "button", class: "quiet", onclick: () => { chat.msgs = []; renderLog(); } }, "Clear chat"))));
+  el("div", { class: "ccomp" }, chatIn, chatSize, el("div", { class: "cacts" }, chatSendBtn, chatProposeBtn, el("button", { type: "button", class: "quiet", onclick: () => { chat.msgs = []; renderLog(); } }, "Clear chat")),
+    el("p", { class: "dim chint" }, "Propose changes turns your text into suggestions you review. Nothing changes until you tick it and press Apply. Edits to existing nodes are more accurate on OpenAI, which asks first.")));
 document.body.append(chatEl);
 
 function modeLabel(m) { return m === "openai" ? "OpenAI" : "Groq"; }
@@ -1492,6 +1495,7 @@ function renderChat() {
   chatAddSel.textContent = sel ? (chat.tray.includes(selectedId) ? "Selected node is added" : "Add “" + sel.name.slice(0, 22) + (sel.name.length > 22 ? "..." : "") + "”") : "Add selected node";
   updateSize();
   chatSendBtn.disabled = chat.busy || !chatIn.value.trim();
+  chatProposeBtn.disabled = chatSendBtn.disabled;
 }
 function updateSize() {
   const ns = trayNodes(), chars = ns.reduce((a, n) => a + nodeChars(n), 0) + chatIn.value.length + CHAT_SYSTEM.length;
@@ -1502,7 +1506,8 @@ function renderLog() {
   chatLog.replaceChildren(...chat.msgs.map((m, i) => {
     const box = el("div", { class: "cmsg " + m.role }, el("div", { class: "who" }, m.role === "user" ? "You" : m.role === "error" ? "Problem" : modeLabel(m.mode) + (m.cost != null ? ", " + usd(m.cost) : "")),
       el("div", { class: "txt" }, m.content));
-    if (m.role === "assistant" && m.mode === "groq" && m.payload) {
+    if (m.set && m.set.items.length) box.append(el("button", { type: "button", class: "retry", onclick: () => openReview(m.set) }, "Open the proposals"));
+    if (m.role === "assistant" && m.mode === "groq" && (m.payload || m.proposeCtx)) {
       box.append(el("button", { type: "button", class: "retry", onclick: () => chatRetryOpenAI(i) }, "Not good enough? Retry with OpenAI (costs money, asks first)"));
     }
     return box;
@@ -1556,12 +1561,14 @@ function aiError(r, what) {
   return j.message || "The AI service returned an error (" + r.status + "). Nothing was changed.";
 }
 // Runs one request. For OpenAI it asks for the cost first. Returns true when a reply was added.
-async function chatRun(mode, messages) {
+async function chatRun(mode, messages, opts) {
+  opts = opts || {};
+  const maxOut = opts.maxOut || CHAT_MAX_OUT, purpose = opts.purpose || "chat", extra = { json: !!opts.json, tier: opts.tier || "fast" };
   chat.busy = true; renderChat(); renderLog();
   try {
     let confirm = null;
     if (mode === "openai") {
-      const e = await apiWrite("POST", "/api/ai/estimate", { mode, messages, max_output_tokens: CHAT_MAX_OUT, purpose: "chat" });
+      const e = await apiWrite("POST", "/api/ai/estimate", { mode, messages, max_output_tokens: maxOut, purpose, ...extra });
       if (e.status !== 200) { chat.msgs.push({ role: "error", content: aiError(e, "OpenAI") }); return false; }
       const j = e.json;
       const c = await choose("Use OpenAI?", el("div", null,
@@ -1572,20 +1579,17 @@ async function chatRun(mode, messages) {
       if (c !== "go") return false;
       confirm = j.worst_case_usd;
     }
-    const r = await apiWrite("POST", "/api/ai/chat", { mode, messages, max_output_tokens: CHAT_MAX_OUT, purpose: "chat", confirm_cost: confirm });
+    const r = await apiWrite("POST", "/api/ai/chat", { mode, messages, max_output_tokens: maxOut, purpose, ...extra, confirm_cost: confirm });
     if (r.status !== 200) { chat.msgs.push({ role: "error", content: aiError(r, modeLabel(mode)) }); return false; }
-    chat.msgs.push({ role: "assistant", content: r.json.text, mode, cost: r.json.usage.cost_usd, payload: messages });
-    return true;
+    if (!opts.raw) chat.msgs.push({ role: "assistant", content: r.json.text, mode, cost: r.json.usage.cost_usd, payload: messages });
+    return r.json;
   } finally {
     chat.busy = false; renderLog(); refreshAiStatus();
   }
 }
-async function chatSend() {
-  if (chat.busy) return;
-  const text = chatIn.value.trim();
-  if (!text) return;
-  if (chat.status && !chat.status[chat.mode].configured) { toast(modeLabel(chat.mode) + " is not set up on the server yet.", true); return; }
-  let nodes = trayNodes(), mask = false, msgText = text;
+// The warn-only explicit check, shared by chat and proposals. Returns { nodes, mask, msgText } or null if cancelled.
+async function screenForSend(text, nodes0) {
+  let nodes = nodes0, mask = false, msgText = text;
   const hits = [];
   for (const n of nodes) { const h = scanExplicit(n.name + ". " + n.summary); if (h.length) hits.push({ label: n.name, node: n, sents: h }); }
   const mh = scanExplicit(text);
@@ -1598,10 +1602,20 @@ async function chatSend() {
     const c = await choose("Possible explicit passages", el("div", null,
       el("p", null, "A rough word check in your browser found passages that may be explicit. Whatever you send goes to " + modeLabel(chat.mode) + ", a third party. You decide:"), list,
       el("p", { class: "dim" }, "This check is crude. It can miss things and flag innocent text. Nothing has been sent or changed.")), buttons);
-    if (c === "cancel") return;
+    if (c === "cancel") return null;
     if (c === "mask") { mask = true; msgText = maskText(text, mh); }
     if (c === "leave") nodes = nodes.filter((n) => !hits.some((h) => h.node === n));
   }
+  return { nodes, mask, msgText };
+}
+async function chatSend() {
+  if (chat.busy) return;
+  const text = chatIn.value.trim();
+  if (!text) return;
+  if (chat.status && !chat.status[chat.mode].configured) { toast(modeLabel(chat.mode) + " is not set up on the server yet.", true); return; }
+  const scr = await screenForSend(text, trayNodes());
+  if (!scr) return;
+  const { nodes, mask, msgText } = scr;
   const blocks = nodes.map((n) => nodeBlock(n, mask));
   const system = CHAT_SYSTEM + (blocks.length ? "\n\nThe writer has shared these nodes:\n\n" + blocks.join("\n\n") : "\n\nNo nodes are shared in this conversation.");
   const hist = chat.msgs.filter((m) => m.role === "user" || m.role === "assistant").slice(-12).map((m) => ({ role: m.role, content: m.sent || m.content }));
@@ -1615,11 +1629,204 @@ async function chatSend() {
 async function chatRetryOpenAI(i) {
   if (chat.busy) return;
   const m = chat.msgs[i];
+  if (m && m.proposeCtx) { await chatPropose(m.proposeCtx, "openai"); return; }
   if (!m || !m.payload) return;
   await chatRun("openai", m.payload);
   renderLog(); renderChat();
 }
-chatIn.addEventListener("input", () => { updateSize(); chatSendBtn.disabled = chat.busy || !chatIn.value.trim(); });
+
+/* proposals (stage 3): turn text into suggested new nodes and ADD-ONLY patches to existing nodes. The AI never writes.
+ * Every proposal quotes the writer's words, is checked here, and is applied only when ticked, after a safety backup. */
+const PROPOSE_MAX_OUT = 4000, MAX_PROPOSALS = 25;
+const PROPOSE_SYSTEM = "You turn a writer's text into proposed changes for a story map. Reply with ONLY a JSON object and no other text: {\"proposals\": [...]}. " +
+  "Each proposal is one of two kinds. " +
+  "1) {\"kind\":\"create\",\"temp_id\":\"new1\",\"type\":\"character|place|rule|thread|question|faction|lore|chapter|other\",\"name\":\"...\",\"summary\":\"...\",\"links\":[{\"to\":\"<id of a shared node or temp_id of another proposal>\",\"label\":\"...\"}],\"time\":null,\"quote\":\"...\"}. " +
+  "2) {\"kind\":\"patch\",\"id\":\"<id of a shared node>\",\"append\":\"<new information to add after the existing summary, or an empty string>\",\"add_links\":[{\"to\":\"<id or temp_id>\",\"label\":\"...\"}],\"time\":null,\"quote\":\"...\"}. " +
+  "Rules: Use only the writer's message and the shared nodes. Never invent facts, names, places, rules or events. " +
+  "Every proposal needs a \"quote\" copied exactly, word for word, from the writer's message or from a shared node's text, which supports the proposal. " +
+  "A patch may only add. Never rewrite, shorten or remove existing text, and do not repeat what a node already says. " +
+  "Leave \"time\" as null unless the text clearly states where it sits in the story; if it does, use {\"era\":\"<an era id from the list given>\",\"order\":<number>}. " +
+  "If nothing is supported by the text, return {\"proposals\":[]}. Return at most " + MAX_PROPOSALS + " proposals.";
+const normQ = (s) => String(s).toLowerCase().replace(/[‘’]/g, "'").replace(/[“”]/g, '"').replace(/\s+/g, " ").trim();
+
+// Checks the AI's reply. Returns { items, skipped }. Nothing in here touches the map.
+function readProposals(reply, ctx) {
+  const skipped = [], items = [];
+  let obj = reply && reply.json && typeof reply.json === "object" ? reply.json : null;
+  if (!obj) return { items, skipped, bad: "The AI's answer was not in the expected format, so nothing was proposed." };
+  const list = Array.isArray(obj.proposals) ? obj.proposals : null;
+  if (!list) return { items, skipped, bad: "The AI's answer had no list of proposals, so nothing was proposed." };
+  const temp = new Set();
+  const soft = (v, n) => (typeof v === "string" ? v.slice(0, n) : "");
+  for (const p of list.slice(0, MAX_PROPOSALS)) if (p && p.kind === "create" && typeof p.temp_id === "string" && /^[A-Za-z0-9_]{1,30}$/.test(p.temp_id) && !ctx.ids.has(p.temp_id)) temp.add(p.temp_id);
+  const linkOk = (to, self) => typeof to === "string" && to !== self && (ctx.ids.has(to) || temp.has(to));
+  const cleanLinks = (arr, self) => (Array.isArray(arr) ? arr : []).filter((l) => l && linkOk(l.to, self)).map((l) => ({ to: l.to, label: soft(l.label, LIM.label).trim() })).slice(0, 12);
+  const cleanTime = (t) => {
+    if (!t || typeof t !== "object") return null;
+    const era = typeof t.era === "string" && ctx.eras.has(t.era) ? t.era : null, order = Number.isFinite(t.order) ? t.order : null;
+    return era === null && order === null ? null : { era, order };
+  };
+  if (list.length > MAX_PROPOSALS) skipped.push("The AI returned " + list.length + " proposals. Only the first " + MAX_PROPOSALS + " are shown.");
+  for (const p of list.slice(0, MAX_PROPOSALS)) {
+    if (!p || typeof p !== "object") { skipped.push("One entry was not a proposal."); continue; }
+    const quote = soft(p.quote, 600).trim(), nq = normQ(quote);
+    const grounded = nq.length >= 12 && ctx.sourceNorm.includes(nq);
+    if (p.kind === "create") {
+      const name = soft(p.name, LIM.name).trim();
+      if (!name) { skipped.push("A new node had no name."); continue; }
+      const type = TYPES[p.type] && p.type !== "other" ? p.type : "other";
+      const tid = temp.has(p.temp_id) ? p.temp_id : "t" + items.length;
+      items.push({ kind: "create", tid, type, name, summary: soft(p.summary, LIM.summary), links: cleanLinks(p.links, tid), time: cleanTime(p.time), quote, grounded, checked: grounded });
+    } else if (p.kind === "patch") {
+      const n = typeof p.id === "string" && ctx.ids.has(p.id) ? graph.byId.get(p.id) : null;
+      if (!n) { skipped.push("A change named a node that was not shared with the AI, so it was ignored."); continue; }
+      const app = soft(p.append, LIM.summary).trim();
+      const dup = app && normQ(n.summary).includes(normQ(app));
+      const links = cleanLinks(p.add_links, n.id).filter((l) => !(n.raw.links || []).some((x) => x && x.to === l.to));
+      const time = hasTime(n.raw) ? null : cleanTime(p.time);
+      if (dup && !links.length && !time) { skipped.push("A change to “" + n.name + "” only repeated text that is already there."); continue; }
+      if (!app && !links.length && !time) { skipped.push("A change to “" + n.name + "” had nothing new in it."); continue; }
+      if (n.summary.length + app.length + 2 > LIM.summary) { skipped.push("The addition to “" + n.name + "” would make its summary too long."); continue; }
+      items.push({ kind: "patch", id: n.id, append: dup ? "" : app, links, time, quote, grounded, checked: grounded });
+    } else skipped.push("An entry had an unknown kind and was ignored.");
+  }
+  return { items, skipped };
+}
+
+const itemTitle = (it) => (it.kind === "create" ? it.name : (graph.byId.get(it.id) || { name: it.id }).name);
+const linkTarget = (to, items) => { const n = graph.byId.get(to); if (n) return n.name; const c = items.find((x) => x.kind === "create" && x.tid === to); return c ? c.name + " (new)" : to; };
+const timeText = (t) => (t.era ? eraName(t.era) : "no era") + (t.order !== null ? ", order " + t.order : "");
+
+// Shows what was proposed. Applying needs a tick and a press of the Apply button.
+function openReview(set) {
+  const { items, skipped } = set;
+  const body = el("div", { class: "prev" });
+  const apply = { n: 0 };
+  const count = () => items.filter((x) => x.checked).length;
+  let ui;
+  const sync = () => { const n = count(); ui.btns.apply.disabled = !n; ui.btns.apply.textContent = n ? "Apply " + n + " selected" : "Nothing selected"; };
+  body.append(el("p", null, items.length ? "The AI suggested " + items.length + " change" + (items.length === 1 ? "" : "s") + ". Nothing has been changed. Tick what you want, then press Apply. A backup is made first, and History can undo it." : "The AI did not find anything in your text to propose."));
+  for (const it of items) {
+    const box = el("input", { type: "checkbox", "aria-label": "Apply this proposal: " + itemTitle(it) });
+    box.checked = it.checked; box.addEventListener("change", () => { it.checked = box.checked; sync(); });
+    const card = el("div", { class: "pcard" + (it.grounded ? "" : " ungrounded") });
+    card.append(el("label", { class: "ph" }, box, el("span", { class: "pk" }, it.kind === "create" ? "New node" : "Add to"), el("strong", null, itemTitle(it)), it.kind === "create" ? el("span", { class: "pt" }, TYPES[it.type].label) : null));
+    if (!it.grounded) card.append(el("p", { class: "warn" }, "Not found in your text. This may be invented. It is unticked."));
+    card.append(el("div", { class: "pq" }, el("small", null, "Quote the AI relied on"), el("blockquote", null, it.quote || "(none given)")));
+    if (it.kind === "create") {
+      card.append(el("div", { class: "padd" }, it.summary || el("span", { class: "dim" }, "(no summary)")));
+    } else {
+      const n = graph.byId.get(it.id), tail = n.summary.length > 140 ? "..." + n.summary.slice(-140) : n.summary;
+      card.append(el("div", { class: "pold" }, el("small", null, "Stays exactly as it is"), el("div", null, tail || "(empty)")));
+      if (it.append) card.append(el("div", { class: "padd note" }, el("small", null, "Added at the end"), el("div", null, it.append)));
+    }
+    for (const l of it.links) card.append(el("div", { class: "padd" }, "Link to " + linkTarget(l.to, items) + (l.label ? " (" + l.label + ")" : "")));
+    if (it.time) card.append(el("div", { class: "padd" }, "Story time: " + timeText(it.time)));
+    body.append(card);
+  }
+  if (skipped.length) body.append(el("details", null, el("summary", null, skipped.length + " thing" + (skipped.length === 1 ? "" : "s") + " could not be used"), el("ul", null, ...skipped.map((s) => el("li", null, s)))));
+  ui = openModal("Proposed changes", body, [
+    { id: "apply", label: "Apply", kind: "primary", onclick: () => applyItems(set, ui) },
+    { id: "close", label: "Close", kind: "quiet", onclick: closeModal },
+  ], { wide: true, sticky: true });
+  sync();
+}
+
+// Add-only merge against the node as it is NOW. Returns the new data, or null when there is nothing to add.
+function mergePatch(data, it) {
+  const d = deepCopy(data), old = String(d.summary || "");
+  let changed = false;
+  if (it.append && !normQ(old).includes(normQ(it.append))) {
+    if (old.length + it.append.length + 2 > LIM.summary) return "too_long";
+    d.summary = old + (old ? (old.endsWith("\n") ? "\n" : "\n\n") : "") + it.append; changed = true;
+  }
+  const have = new Set((Array.isArray(d.links) ? d.links : []).map((l) => l && l.to));
+  const add = it.links.filter((l) => !have.has(l.to));
+  if (add.length) { d.links = [...(Array.isArray(d.links) ? d.links : []), ...add.map((l) => ({ to: l.to, label: l.label }))]; changed = true; }
+  if (it.time && !hasTime(d)) { d.time = { era: it.time.era, order: it.time.order }; changed = true; }
+  return changed ? d : null;
+}
+async function applyPatch(it) {
+  let row = model.rows.get(it.id);
+  for (let attempt = 0; attempt < 3; attempt++) {
+    if (!row) return { ok: false, why: "that node no longer exists" };
+    if (row.hidden) return { ok: false, why: "that node is hidden now" };
+    const d = mergePatch(row.data || {}, it);
+    if (d === "too_long") return { ok: false, why: "the summary would be too long" };
+    if (!d) return { ok: true, note: "already there, nothing to add" };
+    const r = await apiWrite("PUT", "/api/nodes/" + it.id, { data: d, base_rev: row.rev });
+    if (r.status === 200 && r.json && r.json.node) { model.rows.set(it.id, r.json.node); return { ok: true }; }
+    if (r.status === 409 && r.json && r.json.current) { row = r.json.current; model.rows.set(it.id, row); continue; } // someone saved first: merge onto their version
+    return { ok: false, why: r.status === 401 ? "your sign-in ended" : "the server refused it (" + r.status + ")" };
+  }
+  return { ok: false, why: "it kept changing while saving" };
+}
+async function applyItems(set, ui) {
+  const chosen = set.items.filter((x) => x.checked);
+  if (!chosen.length) return;
+  if (editing) { toast("Finish or cancel the node you are editing first, then apply.", true); return; }
+  ui.btns.apply.disabled = true; ui.btns.apply.textContent = "Making a backup...";
+  const b = await apiWrite("POST", "/api/backups", {});
+  if (b.status !== 200) { ui.btns.apply.disabled = false; ui.btns.apply.textContent = "Apply " + chosen.length + " selected"; toast(planMessage(b, "make the safety backup") + " Nothing was applied.", true); return; }
+  ui.btns.apply.textContent = "Applying...";
+  const report = [];
+  const idOf = new Map();
+  for (const it of chosen) if (it.kind === "create") idOf.set(it.tid, uid("n_"));
+  for (const it of chosen) {
+    if (it.kind !== "create") continue;
+    const links = it.links.map((l) => ({ to: idOf.get(l.to) || l.to, label: l.label })).filter((l) => idOf.has(l.to) || graph.byId.has(l.to));
+    const data = { type: it.type, name: it.name, summary: it.summary, links };
+    if (it.time) data.time = { era: it.time.era, order: it.time.order };
+    let id = idOf.get(it.tid), r = await apiWrite("PUT", "/api/nodes/" + id, { data });
+    if (r.status === 409) { const old = id; id = uid("n_"); for (const [k, v] of idOf) if (v === old) idOf.set(k, id); r = await apiWrite("PUT", "/api/nodes/" + id, { data }); }
+    if (r.status === 200 && r.json && r.json.node) { model.rows.set(id, r.json.node); report.push("Created “" + it.name + "”."); }
+    else report.push("Could not create “" + it.name + "” (" + (r.status === 401 ? "your sign-in ended" : "error " + r.status) + ").");
+  }
+  for (const it of chosen) {
+    if (it.kind !== "patch") continue;
+    const nm = itemTitle(it);
+    const links = it.links.map((l) => ({ to: idOf.get(l.to) || l.to, label: l.label })).filter((l) => model.rows.has(l.to) || graph.byId.has(l.to));
+    const res = await applyPatch({ ...it, links });
+    report.push(res.ok ? "Added to “" + nm + "”" + (res.note ? " (" + res.note + ")." : ".") : "Skipped “" + nm + "”: " + res.why + ". Nothing was changed there.");
+  }
+  closeModal();
+  refreshAll(false);
+  const okCount = report.filter((x) => /^(Created|Added)/.test(x)).length;
+  await choose("Done", el("div", null, el("p", null, okCount + " of " + chosen.length + " applied. A backup of the map from just before is in History (the newest “Made by hand”)."),
+    el("ul", { class: "chits" }, ...report.map((x) => el("li", null, x)))), [{ id: "ok", label: "Close", kind: "primary" }]);
+}
+
+async function chatPropose(retryCtx, retryMode) {
+  if (chat.busy) return;
+  let ctx = retryCtx, mode = retryMode || chat.mode;
+  if (!ctx) {
+    const text = chatIn.value.trim();
+    if (!text) return;
+    if (chat.status && !chat.status[chat.mode].configured) { toast(modeLabel(chat.mode) + " is not set up on the server yet.", true); return; }
+    const scr = await screenForSend(text, trayNodes());
+    if (!scr) return;
+    const blocks = scr.nodes.map((n) => nodeBlock(n, scr.mask));
+    const eras = eraList();
+    const system = PROPOSE_SYSTEM + "\n\n" + (eras.length ? "Eras (id: name):\n" + eras.map((e) => e.id + ": " + e.name).join("\n") : "No eras exist yet, so leave time null.") +
+      (blocks.length ? "\n\nShared nodes:\n\n" + blocks.join("\n\n") : "\n\nNo nodes are shared.");
+    ctx = { text, msgText: scr.msgText, ids: new Set(scr.nodes.map((n) => n.id)), eras: new Set(eras.map((e) => String(e.id))),
+      sourceNorm: normQ(scr.msgText + "\n" + scr.nodes.map((n) => n.name + "\n" + n.summary).join("\n")),
+      messages: [{ role: "system", content: system }, { role: "user", content: "The writer's text:\n\n" + scr.msgText }] };
+    chat.msgs.push({ role: "user", content: "(Propose changes) " + text, sent: scr.msgText });
+    chatIn.value = "";
+  }
+  const reply = await chatRun(mode, ctx.messages, { raw: true, json: true, tier: "accurate", maxOut: PROPOSE_MAX_OUT, purpose: "propose" });
+  if (!reply) {
+    if (!retryCtx && chat.msgs[chat.msgs.length - 1].role !== "error") { chat.msgs.pop(); chatIn.value = ctx.text; }
+    renderLog(); renderChat(); return;
+  }
+  const set = readProposals(reply, ctx);
+  chat.msgs.push({ role: "assistant", mode, cost: reply.usage.cost_usd, set, proposeCtx: ctx,
+    content: set.bad || (set.items.length ? set.items.length + " proposal" + (set.items.length === 1 ? "" : "s") + " ready to review, " + set.items.filter((x) => !x.grounded).length + " not found in your text. Nothing has been changed." : "Nothing in your text could be proposed. Nothing has been changed.") });
+  renderLog(); renderChat();
+  if (set.items.length) openReview(set);
+}
+chatIn.addEventListener("input", () => { updateSize(); chatSendBtn.disabled = chat.busy || !chatIn.value.trim(); chatProposeBtn.disabled = chatSendBtn.disabled; });
 chatIn.addEventListener("keydown", (e) => { if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); chatSend(); } });
 $("chatBtn").addEventListener("click", () => chatToggle(!chat.open));
 

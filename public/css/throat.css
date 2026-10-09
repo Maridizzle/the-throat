@@ -289,3 +289,19 @@ body.chat-open #detail,body.chat-open #mini{display:none}
 .chits{margin:8px 0;padding-left:18px}
 .chits li{margin:4px 0;overflow-wrap:anywhere}
 @media (max-width:860px){#chat{left:8px;right:8px;top:auto;bottom:8px;width:auto;height:80vh}}
+
+/* proposals */
+#chat .chint{margin:0;font-size:12px}
+.pcard{border:1px solid rgba(185,166,214,.25);border-radius:10px;padding:10px 12px;margin:10px 0;background:rgba(11,7,20,.45)}
+.pcard.ungrounded{border-color:rgba(214,120,150,.6)}
+.pcard .ph{display:flex;align-items:center;gap:8px;flex-wrap:wrap;cursor:pointer}
+.pcard .pk{font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:var(--muted)}
+.pcard .pt{font-size:11px;color:var(--muted);border:1px solid rgba(185,166,214,.3);border-radius:99px;padding:0 8px}
+.pcard .warn{margin:6px 0 0;color:#E8A0B8;font-size:14px}
+.pcard .pq{margin-top:8px}
+.pcard small{display:block;font-size:10px;letter-spacing:.12em;text-transform:uppercase;color:var(--muted)}
+.pcard blockquote{margin:2px 0 0;padding-left:10px;border-left:2px solid rgba(185,166,214,.4);font-style:italic;overflow-wrap:anywhere;white-space:pre-wrap}
+.pcard .pold{margin-top:8px;color:var(--muted);overflow-wrap:anywhere;white-space:pre-wrap}
+.pcard .padd{margin-top:6px;padding:6px 8px;border-radius:8px;background:rgba(90,170,120,.14);border:1px solid rgba(120,200,150,.35);overflow-wrap:anywhere;white-space:pre-wrap}
+.pcard .padd::before{content:"+ ";color:#9FE0B4}
+.pcard .padd.note::before{content:none}
