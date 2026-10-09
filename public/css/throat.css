@@ -319,3 +319,11 @@ body.chat-open #detail,body.chat-open #mini{display:none}
 #chat .craw{margin-top:8px;font-size:13px}
 #chat .craw summary{cursor:pointer;color:var(--thistle)}
 #chat .craw pre{margin:6px 0 0;white-space:pre-wrap;overflow-wrap:anywhere;max-height:220px;overflow:auto;font:12px/1.4 ui-monospace,Menlo,Consolas,monospace;color:var(--muted);background:rgba(11,7,20,.6);border-radius:8px;padding:8px}
+/* chat that reads the whole map */
+#chat .cmsg.note{opacity:.8;border-style:dashed}
+#chat .pblock{margin-top:8px}
+#chat .pcard{margin:8px 0;padding:8px 10px}
+#chat .pcard .rtext,#chat .pcard blockquote{font-size:14px}
+.pcard .pstrike{text-decoration:line-through;text-decoration-color:rgba(214,120,150,.8);color:var(--muted);overflow-wrap:anywhere;white-space:pre-wrap}
+#chat .pblock>button.primary{margin-top:6px;font:inherit;font-size:13px;color:var(--text);background:linear-gradient(160deg,#4A2C7A,#2B1A42);border:1px solid rgba(185,166,214,.55);border-radius:8px;padding:6px 12px;cursor:pointer}
+#chat .pblock>button.primary:disabled{opacity:.45;cursor:not-allowed}

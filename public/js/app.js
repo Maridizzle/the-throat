@@ -1406,12 +1406,24 @@ $("historyBtn").addEventListener("click", openHistory);
 
 /* story chat (stage 2): talk about the nodes you choose. Groq by default; OpenAI only after you confirm the cost.
  * Nothing here changes the map, and the conversation lives in this tab only. Keys never reach the browser (see ai.js). */
-const CHAT_MAX_OUT = 1500;
-const CHAT_SYSTEM = "You are a careful story analyst helping a writer with a collaborative worldbuilding map called The Throat. " +
-  "Use only the nodes shared with you and what the writer says in this conversation. Never invent story facts, names, places, rules or events. " +
-  "If something is not in the supplied text, say that it is not in the text you were given. When you quote, quote exactly. Keep answers clear and organised. " +
-  "You cannot change the map in this conversation, so never claim to have created or edited anything. If the writer asks for changes, describe what you would suggest and say they can be applied later.";
-const chat = { open: false, mode: "groq", tray: [], msgs: [], busy: false, status: null };
+const CHAT_MAX_OUT = 1500, CHAT_ANSWER_MAX_OUT = 3000, PICK_MAX_OUT = 600, FULL_MAX_CHARS = 30000;
+const ANSWER_SYSTEM = "You are a careful story analyst and editor's assistant for The Throat, a writer's collaborative worldbuilding map. " +
+  "You are given an INDEX of every node (id, type, name, story time, links and a short snippet) and the FULL TEXT of some of the nodes. " +
+  "Use only that and what the writer says in this conversation. Never invent facts, names, places, rules or events. If something is not in the text you were given, say so. " +
+  "If you only have a snippet of a node, say that you only have a snippet instead of guessing what the rest says. When you quote, quote exactly. " +
+  "Reply with ONLY a JSON object and no other text: {\"reply\":\"your answer to the writer, plain text, short paragraphs\",\"proposals\":[...]}. " +
+  "Use proposals only when the writer asks you to create, add to or change something, or pastes material that belongs in the map. Otherwise proposals is []. " +
+  "Proposals never change the map by themselves: the writer reviews and ticks each one. Kinds: " +
+  "1) {\"kind\":\"create\",\"temp_id\":\"new1\",\"type\":\"character|place|rule|thread|question|faction|lore|chapter|other\",\"name\":\"...\",\"summary\":\"...\",\"links\":[{\"to\":\"<node id or temp_id>\",\"label\":\"...\"}],\"time\":null,\"quote\":\"...\"}. " +
+  "2) {\"kind\":\"patch\",\"id\":\"<id>\",\"append\":\"<new information to add after the existing summary, or an empty string>\",\"add_links\":[{\"to\":\"<node id or temp_id>\",\"label\":\"...\"}],\"time\":null,\"quote\":\"...\"}. " +
+  "3) {\"kind\":\"replace\",\"id\":\"<id>\",\"find\":\"<exact text copied from that node's summary>\",\"with\":\"<new wording>\",\"quote\":\"...\"}. " +
+  "Rules: every proposal needs a \"quote\" copied exactly, word for word, from the writer's message or from a node's text, that supports it. " +
+  "patch and replace may only target nodes whose FULL TEXT is shown below. A replace's \"find\" must be copied exactly from that node's summary and appear there once. Keep each replacement as small as possible. " +
+  "Never rename or retype a node, and do not repeat what a node already says. Leave \"time\" as null unless the text clearly states where the node sits in the story; if it does, use {\"era\":\"<an era id from the list given>\",\"order\":<number>}. " +
+  "If the writer asks you to change a node you only have a snippet of, say you need its full text and propose nothing. At most 25 proposals.";
+const PICK_SYSTEM = "You help a story-map chat decide which nodes' full text is needed to answer the writer. Reply with ONLY a JSON object and no other text: {\"node_ids\":[\"id\", ...],\"why\":\"...\"}. " +
+  "Choose ids from the index, at most 12: nodes the writer names or implies, nodes they want changed or linked to, and closely linked nodes when relevant. If the index alone is enough, return an empty list.";
+const chat = { open: false, mode: "groq", tray: [], msgs: [], busy: false, status: null, ack: { set: new Set(), choice: "send" } };
 const usd = (n) => "$" + (n < 0.01 ? n.toFixed(4) : n.toFixed(3));
 const wordCount = (s) => (String(s).trim().match(/\S+/g) || []).length;
 
@@ -1459,23 +1471,22 @@ const ANALYSES = {
     ask: "Analyse the story's arc. The nodes with story time are listed in story order, then the nodes without. Use these sections: Setup, Rising tensions, Turning points the text states, Ticking clocks, Gaps in the sequence, Material without story time." },
 };
 const chatLog = el("div", { class: "clog", role: "log", "aria-live": "polite" });
-const chatIn = el("textarea", { id: "chatIn", rows: "3", placeholder: "Ask about the nodes above, or paste text to talk about...", "aria-label": "Message to the story chat" });
+const chatIn = el("textarea", { id: "chatIn", rows: "3", placeholder: "Ask about your map, or paste text for me to file in it...", "aria-label": "Message to the story chat" });
 const chatSize = el("p", { class: "csize dim" });
 const chatStatus = el("p", { class: "cstat dim", role: "status" });
 const chatTray = el("div", { class: "ctray" });
 const chatModes = el("div", { class: "cmodes", role: "group", "aria-label": "Which AI to use" });
 const chatSendBtn = el("button", { type: "button", class: "primary", onclick: () => chatSend() }, "Send");
-const chatProposeBtn = el("button", { type: "button", onclick: () => chatPropose() }, "Propose changes");
 const chatAddSel = el("button", { type: "button", onclick: () => chatAdd(selectedId) }, "Add selected node");
 const chatEl = el("aside", { class: "panel", id: "chat", hidden: "", "aria-label": "Story chat" },
   el("div", { class: "chead" }, el("h2", null, "Story chat"), el("button", { type: "button", class: "cx", "aria-label": "Close the chat", onclick: () => chatToggle(false) }, "×")),
   chatModes, chatStatus,
-  el("div", { class: "cf" }, "The AI can see"), chatTray,
-  el("div", { class: "cacts" }, chatAddSel, el("button", { type: "button", onclick: chatAddAll }, "Add whole map...")),
+  el("div", { class: "cf" }, "Pinned (always sent in full)"), chatTray,
+  el("div", { class: "cacts" }, chatAddSel),
   chatLog,
   el("div", { class: "can" }, el("span", { class: "cf" }, "Analyze"), ...Object.keys(ANALYSES).map((k) => el("button", { type: "button", title: ANALYSES[k].label, onclick: () => chatAnalyze(k) }, { story: "Story", characters: "Characters", conflict: "Conflict", arc: "Arc" }[k]))),
-  el("div", { class: "ccomp" }, chatIn, chatSize, el("div", { class: "cacts" }, chatSendBtn, chatProposeBtn, el("button", { type: "button", class: "quiet", onclick: () => { chat.msgs = []; renderLog(); } }, "Clear chat")),
-    el("p", { class: "dim chint" }, "Propose changes turns your text into suggestions you review. Nothing changes until you tick it and press Apply. Edits to existing nodes are more accurate on OpenAI, which asks first.")));
+  el("div", { class: "ccomp" }, chatIn, chatSize, el("div", { class: "cacts" }, chatSendBtn, el("button", { type: "button", class: "quiet", onclick: () => { chat.msgs = []; renderLog(); } }, "Clear chat")),
+    el("p", { class: "dim chint" }, "The chat sees an index of your whole map and reads full nodes when your question needs them. Ask it to add, link or change things and it shows proposals here. Nothing changes until you tick it and press Apply. A backup is made first. Edits to existing nodes are more accurate on OpenAI, which asks first.")));
 document.body.append(chatEl);
 
 function modeLabel(m) { return m === "openai" ? "OpenAI" : "Groq"; }
@@ -1500,27 +1511,27 @@ function renderChat() {
   }
   chatTray.replaceChildren(...(trayNodes().length ? trayNodes().map((n) => el("span", { class: "tchip", style: "color:" + TYPES[n.type].hex },
     el("span", { class: "tn" }, n.name), el("button", { type: "button", "aria-label": "Remove " + n.name + " from the chat", onclick: () => { chat.tray = chat.tray.filter((x) => x !== n.id); renderChat(); } }, "×")))
-    : [el("span", { class: "dim" }, "Nothing yet. Select a node and add it, or just type.")]));
+    : [el("span", { class: "dim" }, "Nothing pinned. The AI sees an index of the whole map and picks what it needs. The node you have selected is always included.")]));
   const sel = selectedId && graph.byId.get(selectedId);
   chatAddSel.disabled = !sel || chat.tray.includes(selectedId);
   chatAddSel.textContent = sel ? (chat.tray.includes(selectedId) ? "Selected node is added" : "Add “" + sel.name.slice(0, 22) + (sel.name.length > 22 ? "..." : "") + "”") : "Add selected node";
   updateSize();
   chatSendBtn.disabled = chat.busy || !chatIn.value.trim();
-  chatProposeBtn.disabled = chatSendBtn.disabled;
 }
 function updateSize() {
-  const ns = trayNodes(), chars = ns.reduce((a, n) => a + nodeChars(n), 0) + chatIn.value.length + CHAT_SYSTEM.length;
-  const words = ns.reduce((a, n) => a + wordCount(n.name + " " + n.summary), 0) + wordCount(chatIn.value);
-  chatSize.textContent = "Will send: " + ns.length + " node" + (ns.length === 1 ? "" : "s") + " and your message, about " + words + " words (up to about " + Math.ceil(chars / 3) + " tokens, an estimate).";
+  const all = graph.nodes, pin = trayNodes();
+  const words = all.reduce((a, n) => a + Math.min(30, wordCount(n.summary)), 0) + pin.reduce((a, n) => a + wordCount(n.name + " " + n.summary), 0) + wordCount(chatIn.value);
+  chatSize.textContent = "Each message sends an index of " + all.length + " node" + (all.length === 1 ? "" : "s") + " (names and snippets), your message" + (pin.length ? ", and the full text of " + pin.length + " pinned" : "") + ", about " + words + " words so far. Full text of other nodes is added only when your question needs it.";
 }
 function renderLog() {
   chatLog.replaceChildren(...chat.msgs.map((m, i) => {
-    const box = el("div", { class: "cmsg " + m.role }, el("div", { class: "who" }, m.role === "user" ? "You" : m.role === "error" ? "Problem" : modeLabel(m.mode) + (m.cost != null ? ", " + usd(m.cost) : "")),
+    const box = el("div", { class: "cmsg " + m.role }, el("div", { class: "who" }, m.role === "user" ? "You" : m.role === "error" ? "Problem" : m.role === "note" ? "Note" : modeLabel(m.mode) + (m.cost != null ? ", " + usd(m.cost) : "")),
       el("div", { class: "txt" }, m.content));
     if (m.raw) box.append(el("details", { class: "craw" }, el("summary", null, "What the AI actually said"), el("pre", null, m.raw)));
     if (m.report) box.append(el("button", { type: "button", class: "retry", onclick: () => openReport(m.report.rep, m.report.ctx, m.report.mode, m.report.model) }, "Open the report"));
-    if (m.set && m.set.items.length) box.append(el("button", { type: "button", class: "retry", onclick: () => openReview(m.set) }, "Open the proposals"));
-    if (m.role === "assistant" && m.mode === "groq" && (m.payload || m.proposeCtx || m.rerun)) {
+    if (m.set && m.set.items.length) box.append(proposalBlock(m.set));
+    else if (m.set && m.set.skipped && m.set.skipped.length) box.append(el("details", { class: "craw" }, el("summary", null, "The AI suggested changes that could not be used"), el("ul", null, ...m.set.skipped.map((x) => el("li", null, x)))));
+    if (m.role === "assistant" && m.mode === "groq" && (m.payload || m.rerun)) {
       box.append(el("button", { type: "button", class: "retry", onclick: () => chatRetryOpenAI(i) }, "Not good enough? Retry with OpenAI (costs money, asks first)"));
     }
     return box;
@@ -1546,23 +1557,6 @@ function chatAdd(id) {
   if (!chat.tray.includes(id)) chat.tray.push(id);
   if (!chat.open) chatToggle(true); else renderChat();
 }
-async function chatAddAll() {
-  const ns = graph.nodes.filter((n) => !chat.tray.includes(n.id));
-  if (!ns.length) { toast("Every node is already added, or the map is empty."); return; }
-  const chars = ns.reduce((a, n) => a + nodeChars(n), 0), words = ns.reduce((a, n) => a + wordCount(n.name + " " + n.summary), 0);
-  const limit = chat.status ? chat.status.max_input_chars : 400000;
-  if (chars + CHAT_SYSTEM.length > limit * 0.9) {
-    await choose("Too large for one request", el("div", null, el("p", null, "The whole map is about " + words + " words (about " + chars + " characters). One request can carry at most " + limit + " characters, so add fewer nodes at a time.")), [{ id: "ok", label: "Close" }]);
-    return;
-  }
-  const c = await choose("Add the whole map?", el("div", null,
-    el("p", null, "This adds all " + ns.length + " nodes, about " + words + " words (up to about " + Math.ceil(chars / 3) + " tokens). Every one of them is sent with each message until you remove them."),
-    el("p", { class: "dim" }, "On OpenAI that costs more. You will see the worst-case cost before anything is sent.")),
-    [{ id: "add", label: "Add all " + ns.length + " nodes", kind: "primary" }, { id: "cancel", label: "Cancel", kind: "quiet" }]);
-  if (c !== "add") return;
-  for (const n of ns) chat.tray.push(n.id);
-  renderChat();
-}
 function aiError(r, what) {
   const j = r.json || {};
   if (r.status === 0) return "Could not reach the server. Nothing was sent.";
@@ -1580,7 +1574,8 @@ async function chatRun(mode, messages, opts) {
   chat.busy = true; renderChat(); renderLog();
   try {
     let confirm = null;
-    if (mode === "openai") {
+    if (mode === "openai" && opts.preConfirmed != null) confirm = opts.preConfirmed; // the writer already confirmed the cost of this whole exchange
+    else if (mode === "openai") {
       const e = await apiWrite("POST", "/api/ai/estimate", { mode, messages, max_output_tokens: maxOut, purpose, ...extra });
       if (e.status !== 200) { chat.msgs.push({ role: "error", content: aiError(e, "OpenAI") }); return false; }
       const j = e.json;
@@ -1607,43 +1602,123 @@ async function screenForSend(text, nodes0) {
   for (const n of nodes) { const h = scanExplicit(n.name + ". " + n.summary); if (h.length) hits.push({ label: n.name, node: n, sents: h }); }
   const mh = scanExplicit(text);
   if (mh.length) hits.push({ label: "your message", node: null, sents: mh });
-  if (hits.length) {
-    const list = el("ul", { class: "chits" }, ...hits.map((h) => el("li", null, el("strong", null, h.label + ": "), "“" + h.sents[0].slice(0, 140) + (h.sents[0].length > 140 ? "..." : "") + "”" + (h.sents.length > 1 ? " and " + (h.sents.length - 1) + " more" : ""))));
+  const ack = chat.ack;
+  const fresh = hits.filter((h) => h.sents.some((x) => !ack.set.has(x)));
+  if (fresh.length) {
+    const list = el("ul", { class: "chits" }, ...fresh.map((h) => el("li", null, el("strong", null, h.label + ": "), "\u201c" + h.sents[0].slice(0, 140) + (h.sents[0].length > 140 ? "..." : "") + "\u201d" + (h.sents.length > 1 ? " and " + (h.sents.length - 1) + " more" : ""))));
     const buttons = [{ id: "send", label: "Send anyway", kind: "primary" }, { id: "mask", label: "Mask those passages" }];
-    if (hits.some((h) => h.node)) buttons.push({ id: "leave", label: "Leave those nodes out" });
+    if (fresh.some((h) => h.node)) buttons.push({ id: "leave", label: "Leave those nodes out" });
     buttons.push({ id: "cancel", label: "Cancel", kind: "quiet" });
     const c = await choose("Possible explicit passages", el("div", null,
-      el("p", null, "A rough word check in your browser found passages that may be explicit. Whatever you send goes to " + modeLabel(chat.mode) + ", a third party. You decide:"), list,
+      el("p", null, "A rough word check in your browser found passages that may be explicit. Whatever you send goes to " + modeLabel(chat.mode) + ", a third party. You decide, and I will remember your choice for these passages until you clear the chat:"), list,
       el("p", { class: "dim" }, "This check is crude. It can miss things and flag innocent text. Nothing has been sent or changed.")), buttons);
     if (c === "cancel") return null;
-    if (c === "mask") { mask = true; msgText = maskText(text, mh); }
-    if (c === "leave") nodes = nodes.filter((n) => !hits.some((h) => h.node === n));
+    for (const h of hits) for (const x of h.sents) ack.set.add(x);
+    ack.choice = c;
+  }
+  if (hits.length) {
+    if (ack.choice === "mask") { mask = true; msgText = maskText(text, mh); }
+    if (ack.choice === "leave") nodes = nodes.filter((n) => !hits.some((h) => h.node === n));
   }
   return { nodes, mask, msgText };
+}
+const estUsd = (price, chars, outTok) => (Math.ceil(chars / 3) * price[0] + outTok * price[1]) / 1e6;
+function indexLines(nodes, mask) {
+  const per = Math.max(0, Math.min(160, Math.floor(90000 / Math.max(1, nodes.length)) - 160));
+  return nodes.map((n) => {
+    const ms = mask ? maskText(n.name + "\n" + (n.summary || ""), scanExplicit(n.name + ". " + n.summary)) : n.name + "\n" + (n.summary || "");
+    const [name, ...rest] = ms.split("\n");
+    const sn = rest.join(" ").replace(/\s+/g, " ").trim();
+    const links = (Array.isArray(n.raw.links) ? n.raw.links : []).map((l) => { const t = l && graph.byId.get(l.to); return t ? t.name + (l.label ? " (" + l.label + ")" : "") : null; }).filter(Boolean);
+    return "- id=" + n.id + " | " + TYPES[n.type].label + " | " + name + " | " + (n.u != null ? whenText(n) : "no story time") + " | links: " + (links.length ? links.join("; ") : "none") + " | " + (per ? sn.slice(0, per) + (sn.length > per ? "..." : "") : "");
+  }).join("\n");
+}
+// OpenAI costs money, so one confirmation covers the whole exchange (a small pick call, then the answer). Returns the confirmed amount, or null.
+async function confirmOpenAiExchange(chars, needPick) {
+  const st = chat.status && chat.status.openai;
+  if (!st || !st.prices_per_million_usd) return 0;
+  const pf = st.prices_per_million_usd.fast, pa = st.prices_per_million_usd.accurate;
+  const total = Math.round(1.25 * 1e6 * ((needPick ? estUsd(pf, chars.index + chars.hist + chars.msg + PICK_SYSTEM.length + 1500, PICK_MAX_OUT) : 0) + estUsd(pa, chars.index + chars.full + chars.hist + chars.msg + ANSWER_SYSTEM.length + 3000, CHAT_ANSWER_MAX_OUT))) / 1e6;
+  const c = await choose("Use OpenAI?", el("div", null,
+    el("p", null, "OpenAI costs money. This message may use " + (needPick ? "two calls (a small one to choose which nodes to read, then the answer)" : "one call") + ". The worst case for all of it is " + usd(total) + ", and it is usually far less."),
+    el("p", null, "This month so far: " + usd(st.spent_this_month_usd) + " of " + usd(st.monthly_cap_usd) + ". Model: " + st.accurate_model + "."),
+    el("p", { class: "dim" }, "The estimate counts 3 characters per token and the full reply allowance, plus a safety margin.")),
+    [{ id: "go", label: "Send with OpenAI for up to " + usd(total), kind: "primary" }, { id: "cancel", label: "Cancel", kind: "quiet" }]);
+  return c === "go" ? total : null;
 }
 async function chatSend() {
   if (chat.busy) return;
   const text = chatIn.value.trim();
   if (!text) return;
   if (chat.status && !chat.status[chat.mode].configured) { toast(modeLabel(chat.mode) + " is not set up on the server yet.", true); return; }
-  const scr = await screenForSend(text, trayNodes());
+  const scr = await screenForSend(text, graph.nodes);
   if (!scr) return;
   const { nodes, mask, msgText } = scr;
-  const blocks = nodes.map((n) => nodeBlock(n, mask));
-  const system = CHAT_SYSTEM + (blocks.length ? "\n\nThe writer has shared these nodes:\n\n" + blocks.join("\n\n") : "\n\nNo nodes are shared in this conversation.");
-  const hist = chat.msgs.filter((m) => m.role === "user" || m.role === "assistant").slice(-12).map((m) => ({ role: m.role, content: m.sent || m.content }));
-  const messages = [{ role: "system", content: system }, ...hist, { role: "user", content: msgText }];
+  const limit = chat.status ? chat.status.max_input_chars : 400000;
+  const index = indexLines(nodes, mask);
+  const byIdN = new Map(nodes.map((n) => [n.id, n]));
+  const pinned = new Set(chat.tray.filter((id) => byIdN.has(id)));
+  if (selectedId && byIdN.has(selectedId)) pinned.add(selectedId);
+  const allFull = nodes.reduce((a, n) => a + nodeChars(n), 0);
+  const needPick = allFull > FULL_MAX_CHARS;
+  const hist = chat.msgs.filter((m) => m.role === "user" || m.role === "assistant").slice(-10).map((m) => ({ role: m.role, content: m.sent || m.content }));
+  const histChars = hist.reduce((a, m) => a + m.content.length, 0);
+  let pre = null;
+  if (chat.mode === "openai") {
+    pre = await confirmOpenAiExchange({ index: index.length, full: Math.min(allFull, limit * 0.6), hist: histChars, msg: msgText.length }, needPick);
+    if (pre === null) return;
+  }
   chat.msgs.push({ role: "user", content: text, sent: msgText });
   chatIn.value = "";
-  const added = await chatRun(chat.mode, messages);
-  if (!added && chat.msgs[chat.msgs.length - 1].role !== "error") { chat.msgs.pop(); chatIn.value = text; } // cancelled before sending: put the message back
   renderLog(); renderChat();
+  const ids = new Set(pinned);
+  if (!needPick) for (const n of nodes) ids.add(n.id);
+  else {
+    const pm = [{ role: "system", content: PICK_SYSTEM + "\n\nINDEX:\n" + index },
+      { role: "user", content: "Recent conversation:\n" + (hist.slice(-4).map((m) => m.role + ": " + m.content.slice(0, 300)).join("\n") || "(none)") + "\n\nWriter's message:\n" + msgText }];
+    const pr = await chatRun(chat.mode, pm, { raw: true, json: true, tier: "fast", maxOut: PICK_MAX_OUT, purpose: "chat pick", preConfirmed: pre });
+    if (!pr) { if (chat.msgs[chat.msgs.length - 1].role !== "error") { chat.msgs.pop(); chatIn.value = text; } renderLog(); renderChat(); return; }
+    if (pr.json && Array.isArray(pr.json.node_ids)) { for (const id of pr.json.node_ids.slice(0, 12)) if (typeof id === "string" && byIdN.has(id)) ids.add(id); }
+    else chat.msgs.push({ role: "note", content: "I could not choose nodes automatically, so I only used the index and the nodes you pinned or selected." });
+  }
+  // keep the full text within the request limit, pinned and selected nodes first
+  let used = 0; const full = [];
+  for (const id of [...pinned, ...[...ids].filter((x) => !pinned.has(x))]) {
+    const n = byIdN.get(id); if (!n) continue;
+    const c = nodeChars(n);
+    if (used + c > limit * 0.6) { chat.msgs.push({ role: "note", content: "\u201c" + n.name + "\u201d was left out because the request would be too large." }); continue; }
+    used += c; full.push(n);
+  }
+  const eras = eraList();
+  const system = ANSWER_SYSTEM + "\n\n" + (eras.length ? "Eras (id: name):\n" + eras.map((e) => e.id + ": " + e.name).join("\n") : "No eras exist yet, so leave time null.") +
+    "\n\nINDEX (every node):\n" + (index || "(the map is empty)") +
+    "\n\nFULL TEXT of these nodes (" + (full.length ? full.map((n) => n.id).join(", ") : "none") + "):\n\n" + (full.map((n) => nodeBlock(n, mask)).join("\n\n") || "(none)");
+  const ctx = { ids: new Set(full.map((n) => n.id)), linkIds: new Set(nodes.map((n) => n.id)), eras: new Set(eras.map((e) => String(e.id))),
+    sourceNorm: normQ(msgText + "\n" + index + "\n" + full.map((n) => n.name + "\n" + n.summary).join("\n")),
+    messages: [{ role: "system", content: system }, ...hist, { role: "user", content: msgText }] };
+  const ok = await chatAnswer(ctx, chat.mode, pre);
+  if (!ok && chat.msgs[chat.msgs.length - 1].role !== "error") { chat.msgs.pop(); chatIn.value = text; }
+  renderLog(); renderChat();
+}
+// The answer call. Replies are JSON: { reply, proposals }. If the model did not keep to that, its plain text is shown as the reply.
+async function chatAnswer(ctx, mode, pre) {
+  const reply = await chatRun(mode, ctx.messages, { raw: true, json: true, tier: "accurate", maxOut: CHAT_ANSWER_MAX_OUT, purpose: "chat", preConfirmed: pre });
+  if (!reply) { renderLog(); renderChat(); return false; }
+  const j = reply.json;
+  let text, set = null;
+  if (j && typeof j.reply === "string") {
+    text = j.reply.trim() || "(the AI gave no reply text)";
+    if (Array.isArray(j.proposals) && j.proposals.length) set = readProposals({ json: { proposals: j.proposals } }, ctx);
+  } else text = (reply.text || "").trim() || "(the AI returned no text)";
+  if (reply.truncated) text += "\n\n(The reply hit the length limit and may be cut off.)";
+  chat.msgs.push({ role: "assistant", mode, cost: reply.usage.cost_usd, content: text, set, rerun: (m2) => chatAnswer(ctx, m2) });
+  renderLog(); renderChat();
+  return true;
 }
 async function chatRetryOpenAI(i) {
   if (chat.busy) return;
   const m = chat.msgs[i];
   if (m && m.rerun) { await m.rerun("openai"); return; }
-  if (m && m.proposeCtx) { await chatPropose(m.proposeCtx, "openai"); return; }
   if (!m || !m.payload) return;
   await chatRun("openai", m.payload);
   renderLog(); renderChat();
@@ -1651,16 +1726,7 @@ async function chatRetryOpenAI(i) {
 
 /* proposals (stage 3): turn text into suggested new nodes and ADD-ONLY patches to existing nodes. The AI never writes.
  * Every proposal quotes the writer's words, is checked here, and is applied only when ticked, after a safety backup. */
-const PROPOSE_MAX_OUT = 4000, ANALYZE_MAX_OUT = 8000, MAX_PROPOSALS = 25;
-const PROPOSE_SYSTEM = "You turn a writer's text into proposed changes for a story map. Reply with ONLY a JSON object and no other text: {\"proposals\": [...]}. " +
-  "Each proposal is one of two kinds. " +
-  "1) {\"kind\":\"create\",\"temp_id\":\"new1\",\"type\":\"character|place|rule|thread|question|faction|lore|chapter|other\",\"name\":\"...\",\"summary\":\"...\",\"links\":[{\"to\":\"<id of a shared node or temp_id of another proposal>\",\"label\":\"...\"}],\"time\":null,\"quote\":\"...\"}. " +
-  "2) {\"kind\":\"patch\",\"id\":\"<id of a shared node>\",\"append\":\"<new information to add after the existing summary, or an empty string>\",\"add_links\":[{\"to\":\"<id or temp_id>\",\"label\":\"...\"}],\"time\":null,\"quote\":\"...\"}. " +
-  "Rules: Use only the writer's message and the shared nodes. Never invent facts, names, places, rules or events. " +
-  "Every proposal needs a \"quote\" copied exactly, word for word, from the writer's message or from a shared node's text, which supports the proposal. " +
-  "A patch may only add. Never rewrite, shorten or remove existing text, and do not repeat what a node already says. " +
-  "Leave \"time\" as null unless the text clearly states where it sits in the story; if it does, use {\"era\":\"<an era id from the list given>\",\"order\":<number>}. " +
-  "If nothing is supported by the text, return {\"proposals\":[]}. Return at most " + MAX_PROPOSALS + " proposals.";
+const ANALYZE_MAX_OUT = 8000, MAX_PROPOSALS = 25;
 const normQ = (s) => String(s).toLowerCase().replace(/[‘’]/g, "'").replace(/[“”]/g, '"').replace(/\s+/g, " ").trim();
 
 // Checks the AI's reply. Returns { items, skipped }. Nothing in here touches the map.
@@ -1672,8 +1738,8 @@ function readProposals(reply, ctx) {
   if (!list) return { items, skipped, bad: "The AI's answer had no list of proposals, so nothing was proposed." };
   const temp = new Set();
   const soft = (v, n) => (typeof v === "string" ? v.slice(0, n) : "");
-  for (const p of list.slice(0, MAX_PROPOSALS)) if (p && p.kind === "create" && typeof p.temp_id === "string" && /^[A-Za-z0-9_]{1,30}$/.test(p.temp_id) && !ctx.ids.has(p.temp_id)) temp.add(p.temp_id);
-  const linkOk = (to, self) => typeof to === "string" && to !== self && (ctx.ids.has(to) || temp.has(to));
+  for (const p of list.slice(0, MAX_PROPOSALS)) if (p && p.kind === "create" && typeof p.temp_id === "string" && /^[A-Za-z0-9_]{1,30}$/.test(p.temp_id) && !(ctx.linkIds || ctx.ids).has(p.temp_id)) temp.add(p.temp_id);
+  const linkOk = (to, self) => typeof to === "string" && to !== self && ((ctx.linkIds || ctx.ids).has(to) || temp.has(to));
   const cleanLinks = (arr, self) => (Array.isArray(arr) ? arr : []).filter((l) => l && linkOk(l.to, self)).map((l) => ({ to: l.to, label: soft(l.label, LIM.label).trim() })).slice(0, 12);
   const cleanTime = (t) => {
     if (!t || typeof t !== "object") return null;
@@ -1702,6 +1768,14 @@ function readProposals(reply, ctx) {
       if (!app && !links.length && !time) { skipped.push("A change to “" + n.name + "” had nothing new in it."); continue; }
       if (n.summary.length + app.length + 2 > LIM.summary) { skipped.push("The addition to “" + n.name + "” would make its summary too long."); continue; }
       items.push({ kind: "patch", id: n.id, append: dup ? "" : app, links, time, quote, grounded, checked: grounded });
+    } else if (p.kind === "replace") {
+      const n = typeof p.id === "string" && ctx.ids.has(p.id) ? graph.byId.get(p.id) : null;
+      if (!n) { skipped.push("A replacement named a node whose full text was not shown to the AI, so it was ignored."); continue; }
+      const find = typeof p.find === "string" ? p.find.slice(0, 4000) : "", neu = typeof p.with === "string" ? p.with.slice(0, LIM.summary) : "";
+      if (!find || n.summary.split(find).length - 1 !== 1) { skipped.push("A replacement in \u201c" + n.name + "\u201d quoted text that is not in the node exactly once, so it was ignored."); continue; }
+      if (find === neu) { skipped.push("A replacement in \u201c" + n.name + "\u201d changed nothing."); continue; }
+      if (n.summary.length - find.length + neu.length > LIM.summary) { skipped.push("A replacement in \u201c" + n.name + "\u201d would make the summary too long."); continue; }
+      items.push({ kind: "replace", id: n.id, find, with: neu, quote, grounded, checked: false }); // replacements always start unticked
     } else skipped.push("An entry had an unknown kind and was ignored.");
   }
   return { items, skipped };
@@ -1715,43 +1789,52 @@ const linkTarget = (to, items) => { const n = graph.byId.get(to); if (n) return 
 const timeText = (t) => (t.era ? eraName(t.era) : "no era") + (t.order !== null ? ", order " + t.order : "");
 
 // Shows what was proposed. Applying needs a tick and a press of the Apply button.
-function openReview(set) {
-  const { items, skipped } = set;
-  const body = el("div", { class: "prev" });
-  const apply = { n: 0 };
-  const count = () => items.filter((x) => x.checked).length;
-  let ui;
-  const sync = () => { const n = count(); ui.btns.apply.disabled = !n; ui.btns.apply.textContent = n ? "Apply " + n + " selected" : "Nothing selected"; };
-  body.append(el("p", null, items.length ? "The AI suggested " + items.length + " change" + (items.length === 1 ? "" : "s") + ". Nothing has been changed. Tick what you want, then press Apply. A backup is made first, and History can undo it." : "The AI did not find anything in your text to propose."));
-  for (const it of items) {
-    const box = el("input", { type: "checkbox", "aria-label": "Apply this proposal: " + itemTitle(it) });
-    box.checked = it.checked; box.addEventListener("change", () => { it.checked = box.checked; sync(); });
-    const card = el("div", { class: "pcard" + (it.grounded ? "" : " ungrounded") });
-    card.append(el("label", { class: "ph" }, box, el("span", { class: "pk" }, it.kind === "create" ? "New node" : "Add to"), el("strong", null, itemTitle(it)), it.kind === "create" ? el("span", { class: "pt" }, TYPES[it.type].label) : null));
-    if (!it.grounded) card.append(el("p", { class: "warn" }, "Not found in your text. This may be invented. It is unticked."));
-    card.append(el("div", { class: "pq" }, el("small", null, "Quote the AI relied on"), el("blockquote", null, it.quote || "(none given)")));
-    if (it.kind === "create") {
-      card.append(el("div", { class: "padd" }, it.summary || el("span", { class: "dim" }, "(no summary)")));
-    } else {
-      const n = graph.byId.get(it.id), tail = n.summary.length > 140 ? "..." + n.summary.slice(-140) : n.summary;
-      card.append(el("div", { class: "pold" }, el("small", null, "Stays exactly as it is"), el("div", null, tail || "(empty)")));
-      if (it.append) card.append(el("div", { class: "padd note" }, el("small", null, "Added at the end"), el("div", null, it.append)));
-    }
-    for (const l of it.links) card.append(el("div", { class: "padd" }, "Link to " + linkTarget(l.to, items) + (l.label ? " (" + l.label + ")" : "")));
-    if (it.time) card.append(el("div", { class: "padd" }, "Story time: " + timeText(it.time)));
-    body.append(card);
+const KIND_LABEL = { create: "New node", patch: "Add to", replace: "Replace in" };
+function buildCard(it, items, sync, locked) {
+  const box = el("input", { type: "checkbox", "aria-label": "Apply this proposal: " + itemTitle(it) });
+  box.checked = it.checked; box.disabled = !!locked; box.addEventListener("change", () => { it.checked = box.checked; sync(); });
+  const card = el("div", { class: "pcard" + (it.grounded ? "" : " ungrounded") });
+  card.append(el("label", { class: "ph" }, box, el("span", { class: "pk" }, KIND_LABEL[it.kind]), el("strong", null, itemTitle(it)), it.kind === "create" ? el("span", { class: "pt" }, TYPES[it.type].label) : null));
+  if (!it.grounded) card.append(el("p", { class: "warn" }, "Not found in your text. This may be invented. It is unticked."));
+  if (it.kind === "replace") card.append(el("p", { class: "warn" }, "This replaces existing text. It starts unticked, and applying it only works if that exact passage is still there."));
+  card.append(el("div", { class: "pq" }, el("small", null, "Quote the AI relied on"), el("blockquote", null, it.quote || "(none given)")));
+  if (it.kind === "create") {
+    card.append(el("div", { class: "padd" }, it.summary || el("span", { class: "dim" }, "(no summary)")));
+  } else if (it.kind === "replace") {
+    card.append(el("div", { class: "pold" }, el("small", null, "Old text"), el("div", { class: "pstrike" }, it.find)));
+    card.append(el("div", { class: "padd note" }, el("small", null, "New text"), el("div", null, it.with || "(removed)")));
+  } else {
+    const n = graph.byId.get(it.id), tail = n.summary.length > 140 ? "..." + n.summary.slice(-140) : n.summary;
+    card.append(el("div", { class: "pold" }, el("small", null, "Stays exactly as it is"), el("div", null, tail || "(empty)")));
+    if (it.append) card.append(el("div", { class: "padd note" }, el("small", null, "Added at the end"), el("div", null, it.append)));
   }
-  if (skipped.length) body.append(el("details", null, el("summary", null, skipped.length + " thing" + (skipped.length === 1 ? "" : "s") + " could not be used"), el("ul", null, ...skipped.map((s) => el("li", null, s)))));
-  ui = openModal("Proposed changes", body, [
-    { id: "apply", label: "Apply", kind: "primary", onclick: () => applyItems(set, ui) },
-    { id: "close", label: "Close", kind: "quiet", onclick: closeModal },
-  ], { wide: true, sticky: true });
+  for (const l of it.links || []) card.append(el("div", { class: "padd" }, "Link to " + linkTarget(l.to, items) + (l.label ? " (" + l.label + ")" : "")));
+  if (it.time) card.append(el("div", { class: "padd" }, "Story time: " + timeText(it.time)));
+  return card;
+}
+// The proposals shown inside the AI's reply in the chat. Nothing is applied until the writer ticks it and presses Apply.
+function proposalBlock(set) {
+  const wrap = el("div", { class: "pblock" });
+  const btn = el("button", { type: "button", class: "primary" }, "");
+  const sync = () => { const n = set.items.filter((x) => x.checked).length; btn.disabled = !!set.applied || !n; btn.textContent = set.applied ? "Applied" : n ? "Apply " + n + " selected (a backup is made first)" : "Nothing selected"; };
+  wrap.append(el("p", { class: "dim" }, set.applied ? "These proposals were applied." : set.items.length + " proposal" + (set.items.length === 1 ? "" : "s") + ". Nothing has been changed. Tick what you want."));
+  for (const it of set.items) wrap.append(buildCard(it, set.items, sync, set.applied));
+  btn.addEventListener("click", () => applyItems(set, btn, () => { set.applied = true; renderLog(); }));
+  wrap.append(btn);
+  if (set.skipped && set.skipped.length) wrap.append(el("details", { class: "craw" }, el("summary", null, set.skipped.length + " thing" + (set.skipped.length === 1 ? "" : "s") + " could not be used"), el("ul", null, ...set.skipped.map((x) => el("li", null, x)))));
   sync();
+  return wrap;
 }
 
 // Add-only merge against the node as it is NOW. Returns the new data, or null when there is nothing to add.
 function mergePatch(data, it) {
   const d = deepCopy(data), old = String(d.summary || "");
+  if (it.kind === "replace") { // only if that exact passage is still in the node, exactly once
+    if (old.split(it.find).length - 1 !== 1) return "gone";
+    const i = old.indexOf(it.find);
+    d.summary = old.slice(0, i) + it.with + old.slice(i + it.find.length);
+    return d.summary === old ? null : d;
+  }
   let changed = false;
   if (it.append && !normQ(old).includes(normQ(it.append))) {
     if (old.length + it.append.length + 2 > LIM.summary) return "too_long";
@@ -1770,6 +1853,7 @@ async function applyPatch(it) {
     if (row.hidden) return { ok: false, why: "that node is hidden now" };
     const d = mergePatch(row.data || {}, it);
     if (d === "too_long") return { ok: false, why: "the summary would be too long" };
+    if (d === "gone") return { ok: false, why: "that passage has changed or is no longer there" };
     if (!d) return { ok: true, note: "already there, nothing to add" };
     const r = await apiWrite("PUT", "/api/nodes/" + it.id, { data: d, base_rev: row.rev });
     if (r.status === 200 && r.json && r.json.node) { model.rows.set(it.id, r.json.node); return { ok: true }; }
@@ -1778,14 +1862,14 @@ async function applyPatch(it) {
   }
   return { ok: false, why: "it kept changing while saving" };
 }
-async function applyItems(set, ui) {
+async function applyItems(set, btn, onDone) {
   const chosen = set.items.filter((x) => x.checked);
   if (!chosen.length) return;
   if (editing) { toast("Finish or cancel the node you are editing first, then apply.", true); return; }
-  ui.btns.apply.disabled = true; ui.btns.apply.textContent = "Making a backup...";
+  btn.disabled = true; btn.textContent = "Making a backup...";
   const b = await apiWrite("POST", "/api/backups", {});
-  if (b.status !== 200) { ui.btns.apply.disabled = false; ui.btns.apply.textContent = "Apply " + chosen.length + " selected"; toast(planMessage(b, "make the safety backup") + " Nothing was applied.", true); return; }
-  ui.btns.apply.textContent = "Applying...";
+  if (b.status !== 200) { btn.disabled = false; btn.textContent = "Apply " + chosen.length + " selected"; toast(planMessage(b, "make the safety backup") + " Nothing was applied.", true); return; }
+  btn.textContent = "Applying...";
   const report = [];
   const idOf = new Map();
   for (const it of chosen) if (it.kind === "create") idOf.set(it.tid, uid("n_"));
@@ -1799,49 +1883,18 @@ async function applyItems(set, ui) {
     if (r.status === 200 && r.json && r.json.node) { model.rows.set(id, r.json.node); report.push("Created “" + it.name + "”."); }
     else report.push("Could not create “" + it.name + "” (" + (r.status === 401 ? "your sign-in ended" : "error " + r.status) + ").");
   }
-  for (const it of chosen) {
-    if (it.kind !== "patch") continue;
+  for (const kind of ["patch", "replace"]) for (const it of chosen) {
+    if (it.kind !== kind) continue;
     const nm = itemTitle(it);
-    const links = it.links.map((l) => ({ to: idOf.get(l.to) || l.to, label: l.label })).filter((l) => model.rows.has(l.to) || graph.byId.has(l.to));
+    const links = (it.links || []).map((l) => ({ to: idOf.get(l.to) || l.to, label: l.label })).filter((l) => model.rows.has(l.to) || graph.byId.has(l.to));
     const res = await applyPatch({ ...it, links });
-    report.push(res.ok ? "Added to “" + nm + "”" + (res.note ? " (" + res.note + ")." : ".") : "Skipped “" + nm + "”: " + res.why + ". Nothing was changed there.");
+    report.push(res.ok ? (kind === "replace" ? "Replaced a passage in \u201c" : "Added to \u201c") + nm + "\u201d" + (res.note ? " (" + res.note + ")." : ".") : "Skipped \u201c" + nm + "\u201d: " + res.why + ". Nothing was changed there.");
   }
-  closeModal();
+  onDone();
   refreshAll(false);
-  const okCount = report.filter((x) => /^(Created|Added)/.test(x)).length;
+  const okCount = report.filter((x) => /^(Created|Added|Replaced)/.test(x)).length;
   await choose("Done", el("div", null, el("p", null, okCount + " of " + chosen.length + " applied. A backup of the map from just before is in History (the newest “Made by hand”)."),
     el("ul", { class: "chits" }, ...report.map((x) => el("li", null, x)))), [{ id: "ok", label: "Close", kind: "primary" }]);
-}
-
-async function chatPropose(retryCtx, retryMode) {
-  if (chat.busy) return;
-  let ctx = retryCtx, mode = retryMode || chat.mode;
-  if (!ctx) {
-    const text = chatIn.value.trim();
-    if (!text) return;
-    if (chat.status && !chat.status[chat.mode].configured) { toast(modeLabel(chat.mode) + " is not set up on the server yet.", true); return; }
-    const scr = await screenForSend(text, trayNodes());
-    if (!scr) return;
-    const blocks = scr.nodes.map((n) => nodeBlock(n, scr.mask));
-    const eras = eraList();
-    const system = PROPOSE_SYSTEM + "\n\n" + (eras.length ? "Eras (id: name):\n" + eras.map((e) => e.id + ": " + e.name).join("\n") : "No eras exist yet, so leave time null.") +
-      (blocks.length ? "\n\nShared nodes:\n\n" + blocks.join("\n\n") : "\n\nNo nodes are shared.");
-    ctx = { text, msgText: scr.msgText, ids: new Set(scr.nodes.map((n) => n.id)), eras: new Set(eras.map((e) => String(e.id))),
-      sourceNorm: normQ(scr.msgText + "\n" + scr.nodes.map((n) => n.name + "\n" + n.summary).join("\n")),
-      messages: [{ role: "system", content: system }, { role: "user", content: "The writer's text:\n\n" + scr.msgText }] };
-    chat.msgs.push({ role: "user", content: "(Propose changes) " + text, sent: scr.msgText });
-    chatIn.value = "";
-  }
-  const reply = await chatRun(mode, ctx.messages, { raw: true, json: true, tier: "accurate", maxOut: PROPOSE_MAX_OUT, purpose: "propose" });
-  if (!reply) {
-    if (!retryCtx && chat.msgs[chat.msgs.length - 1].role !== "error") { chat.msgs.pop(); chatIn.value = ctx.text; }
-    renderLog(); renderChat(); return;
-  }
-  const set = readProposals(reply, ctx);
-  chat.msgs.push({ role: "assistant", mode, cost: reply.usage.cost_usd, set, proposeCtx: ctx, ...(set.bad ? badReply(set.bad, reply) : {}),
-    content: (set.bad ? badReply(set.bad, reply).content : null) || (set.items.length ? set.items.length + " proposal" + (set.items.length === 1 ? "" : "s") + " ready to review, " + set.items.filter((x) => !x.grounded).length + " not found in your text. Nothing has been changed." : "Nothing in your text could be proposed. Nothing has been changed.") });
-  renderLog(); renderChat();
-  if (set.items.length) openReview(set);
 }
 
 /* analyses (stage 4): four read-only reports about the nodes you choose. Each finding is labeled Stated, Inference or
@@ -1978,7 +2031,7 @@ async function chatAnalyze(kindKey, retryCtx, retryMode) {
   renderLog(); renderChat();
   if (!rep.bad) openReport(rep, ctx, mode, reply.model);
 }
-chatIn.addEventListener("input", () => { updateSize(); chatSendBtn.disabled = chat.busy || !chatIn.value.trim(); chatProposeBtn.disabled = chatSendBtn.disabled; });
+chatIn.addEventListener("input", () => { updateSize(); chatSendBtn.disabled = chat.busy || !chatIn.value.trim(); });
 chatIn.addEventListener("keydown", (e) => { if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); chatSend(); } });
 $("chatBtn").addEventListener("click", () => chatToggle(!chat.open));
 
