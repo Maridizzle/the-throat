@@ -150,13 +150,15 @@ function createAi(env, deps) {
       if (!j) return { fail: 502, detail: "reply was not JSON" };
       if (req.provider === "groq") {
         const m = j.choices && j.choices[0] && j.choices[0].message;
-        return { text: m && typeof m.content === "string" ? m.content : "", input: j.usage && j.usage.prompt_tokens, output: j.usage && j.usage.completion_tokens };
+        return { text: m && typeof m.content === "string" ? m.content : "", input: j.usage && j.usage.prompt_tokens, output: j.usage && j.usage.completion_tokens,
+          truncated: !!(j.choices && j.choices[0] && j.choices[0].finish_reason === "length") };
       }
       let text = typeof j.output_text === "string" ? j.output_text : "";
       if (!text && Array.isArray(j.output)) {
         for (const item of j.output) for (const c of (item && item.content) || []) if (c && typeof c.text === "string") text += c.text;
       }
-      return { text, input: j.usage && j.usage.input_tokens, output: j.usage && j.usage.output_tokens };
+      return { text, input: j.usage && j.usage.input_tokens, output: j.usage && j.usage.output_tokens,
+        truncated: j.status === "incomplete" && !!(j.incomplete_details && j.incomplete_details.reason === "max_output_tokens") };
     } catch (e) {
       return { fail: e.name === "AbortError" ? 504 : 502, detail: e.name === "AbortError" ? "timed out" : "could not reach the provider" };
     } finally { clearTimeout(timer); }
@@ -254,6 +256,7 @@ function createAi(env, deps) {
     if (!out.text) return res.status(502).json({ error: "empty_reply", message: "The provider returned no text." });
     const json = r.json ? parseJson(out.text) : null;
     res.json({ ok: true, provider: r.provider, model: r.model.id, text: out.text, json, json_ok: r.json ? json !== null : null, json_fallback: fellBack,
+      truncated: !!out.truncated || (known && out.output >= r.maxOut * 0.98),
       usage: { input_tokens: ev.input_tokens, output_tokens: ev.output_tokens, cost_usd: ev.cost_usd },
       spent_this_month_usd: round6(spent[r.provider]), monthly_cap_usd: p.cap });
   }));

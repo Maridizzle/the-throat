@@ -316,3 +316,6 @@ body.chat-open #detail,body.chat-open #mini{display:none}
 .pcard.rf .pk.lab-inference{color:#E6CF8E}
 .pcard.rf .pk.lab-not_in_text{color:#B9A6D6}
 .pcard.rf blockquote{margin-top:6px}
+#chat .craw{margin-top:8px;font-size:13px}
+#chat .craw summary{cursor:pointer;color:var(--thistle)}
+#chat .craw pre{margin:6px 0 0;white-space:pre-wrap;overflow-wrap:anywhere;max-height:220px;overflow:auto;font:12px/1.4 ui-monospace,Menlo,Consolas,monospace;color:var(--muted);background:rgba(11,7,20,.6);border-radius:8px;padding:8px}

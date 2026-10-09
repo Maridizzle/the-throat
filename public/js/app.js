@@ -1517,6 +1517,7 @@ function renderLog() {
   chatLog.replaceChildren(...chat.msgs.map((m, i) => {
     const box = el("div", { class: "cmsg " + m.role }, el("div", { class: "who" }, m.role === "user" ? "You" : m.role === "error" ? "Problem" : modeLabel(m.mode) + (m.cost != null ? ", " + usd(m.cost) : "")),
       el("div", { class: "txt" }, m.content));
+    if (m.raw) box.append(el("details", { class: "craw" }, el("summary", null, "What the AI actually said"), el("pre", null, m.raw)));
     if (m.report) box.append(el("button", { type: "button", class: "retry", onclick: () => openReport(m.report.rep, m.report.ctx, m.report.mode, m.report.model) }, "Open the report"));
     if (m.set && m.set.items.length) box.append(el("button", { type: "button", class: "retry", onclick: () => openReview(m.set) }, "Open the proposals"));
     if (m.role === "assistant" && m.mode === "groq" && (m.payload || m.proposeCtx || m.rerun)) {
@@ -1650,7 +1651,7 @@ async function chatRetryOpenAI(i) {
 
 /* proposals (stage 3): turn text into suggested new nodes and ADD-ONLY patches to existing nodes. The AI never writes.
  * Every proposal quotes the writer's words, is checked here, and is applied only when ticked, after a safety backup. */
-const PROPOSE_MAX_OUT = 4000, MAX_PROPOSALS = 25;
+const PROPOSE_MAX_OUT = 4000, ANALYZE_MAX_OUT = 8000, MAX_PROPOSALS = 25;
 const PROPOSE_SYSTEM = "You turn a writer's text into proposed changes for a story map. Reply with ONLY a JSON object and no other text: {\"proposals\": [...]}. " +
   "Each proposal is one of two kinds. " +
   "1) {\"kind\":\"create\",\"temp_id\":\"new1\",\"type\":\"character|place|rule|thread|question|faction|lore|chapter|other\",\"name\":\"...\",\"summary\":\"...\",\"links\":[{\"to\":\"<id of a shared node or temp_id of another proposal>\",\"label\":\"...\"}],\"time\":null,\"quote\":\"...\"}. " +
@@ -1706,6 +1707,9 @@ function readProposals(reply, ctx) {
   return { items, skipped };
 }
 
+// What to tell the writer when a reply could not be read: the reason, and the start of what the AI actually said.
+const badReply = (reason, reply) => ({ content: reason + (reply.truncated ? " The reply hit the length limit and was cut off before it finished." : ""),
+  raw: typeof reply.text === "string" && reply.text.trim() ? reply.text.trim().slice(0, 1500) + (reply.text.trim().length > 1500 ? "..." : "") : "(the AI returned no text)" });
 const itemTitle = (it) => (it.kind === "create" ? it.name : (graph.byId.get(it.id) || { name: it.id }).name);
 const linkTarget = (to, items) => { const n = graph.byId.get(to); if (n) return n.name; const c = items.find((x) => x.kind === "create" && x.tid === to); return c ? c.name + " (new)" : to; };
 const timeText = (t) => (t.era ? eraName(t.era) : "no era") + (t.order !== null ? ", order " + t.order : "");
@@ -1834,8 +1838,8 @@ async function chatPropose(retryCtx, retryMode) {
     renderLog(); renderChat(); return;
   }
   const set = readProposals(reply, ctx);
-  chat.msgs.push({ role: "assistant", mode, cost: reply.usage.cost_usd, set, proposeCtx: ctx,
-    content: set.bad || (set.items.length ? set.items.length + " proposal" + (set.items.length === 1 ? "" : "s") + " ready to review, " + set.items.filter((x) => !x.grounded).length + " not found in your text. Nothing has been changed." : "Nothing in your text could be proposed. Nothing has been changed.") });
+  chat.msgs.push({ role: "assistant", mode, cost: reply.usage.cost_usd, set, proposeCtx: ctx, ...(set.bad ? badReply(set.bad, reply) : {}),
+    content: (set.bad ? badReply(set.bad, reply).content : null) || (set.items.length ? set.items.length + " proposal" + (set.items.length === 1 ? "" : "s") + " ready to review, " + set.items.filter((x) => !x.grounded).length + " not found in your text. Nothing has been changed." : "Nothing in your text could be proposed. Nothing has been changed.") });
   renderLog(); renderChat();
   if (set.items.length) openReview(set);
 }
@@ -1846,7 +1850,7 @@ const ANALYZE_SYSTEM = "You are a careful story analyst for a writer's collabora
   "{\"title\":\"...\",\"sections\":[{\"heading\":\"...\",\"findings\":[{\"label\":\"stated|inference|not_in_text\",\"text\":\"...\",\"nodes\":[\"node name\"],\"quote\":\"...\"}]}],\"open_questions\":[\"...\"]}. " +
   "Labels: \"stated\" means the text says it directly, and needs an exact quote. \"inference\" means you reasoned it from the text, and the quote is the evidence. \"not_in_text\" means a gap, something the text does not say, and the quote may be empty. " +
   "Every quote must be copied exactly, word for word, from a shared node or from the writer's focus note. Use only the shared nodes. Never invent facts, names, places, rules or events, and never supply missing lore. " +
-  "Phrase suggestions as questions in open_questions, because the writer decides the story. At most 8 sections and 8 findings per section. ";
+  "Phrase suggestions as questions in open_questions, because the writer decides the story. At most 8 sections and 8 findings per section, and keep each finding to one or two sentences so the whole answer stays short. ";
 const LABELS = { stated: "Stated in the text", inference: "Inference", not_in_text: "Not in the text" };
 
 function readAnalysis(reply, ctx) {
@@ -1963,14 +1967,14 @@ async function chatAnalyze(kindKey, retryCtx, retryMode) {
     chat.msgs.push({ role: "user", content: "(" + kind.label + ") " + (focus || "no focus note"), sent: scr.msgText });
     chatIn.value = "";
   }
-  const reply = await chatRun(mode, ctx.messages, { raw: true, json: true, tier: "accurate", maxOut: PROPOSE_MAX_OUT, purpose: "analyze " + ctx.kindKey });
+  const reply = await chatRun(mode, ctx.messages, { raw: true, json: true, tier: "accurate", maxOut: ANALYZE_MAX_OUT, purpose: "analyze " + ctx.kindKey });
   if (!reply) {
     if (!retryCtx && chat.msgs[chat.msgs.length - 1].role !== "error") { chat.msgs.pop(); chatIn.value = ctx.focusNote; }
     renderLog(); renderChat(); return;
   }
   const rep = readAnalysis(reply, ctx);
-  chat.msgs.push({ role: "assistant", mode, cost: reply.usage.cost_usd, rerun: (m2) => chatAnalyze(ctx.kindKey, ctx, m2), report: rep.bad ? null : { rep, ctx, mode, model: reply.model },
-    content: rep.bad || ctx.kind.label + " ready: " + rep.total + " findings, " + rep.flagged + " with a quote not found in your text. Nothing has been changed." });
+  chat.msgs.push({ role: "assistant", mode, cost: reply.usage.cost_usd, rerun: (m2) => chatAnalyze(ctx.kindKey, ctx, m2), report: rep.bad ? null : { rep, ctx, mode, model: reply.model }, ...(rep.bad ? badReply(rep.bad, reply) : {}),
+    content: (rep.bad ? badReply(rep.bad, reply).content : null) || ctx.kind.label + " ready: " + rep.total + " findings, " + rep.flagged + " with a quote not found in your text. Nothing has been changed." });
   renderLog(); renderChat();
   if (!rep.bad) openReport(rep, ctx, mode, reply.model);
 }
