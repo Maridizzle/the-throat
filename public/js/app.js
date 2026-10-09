@@ -34,6 +34,8 @@ const POLL_MS = 8000, POLL_OVERLAP = 8;
 /* ---------- model and API ---------- */
 const model = { rows: new Map(), meta: new Map(), seq: 0 };
 let lastSync = 0, online = true;
+let me = null;  // { mode, writer, writers } from /api/me
+let peers = []; // who is online: [{ id, name, color, focus, editing }]
 
 async function fetchState(sinceSeq) {
   const r = await fetch("/api/state?since_seq=" + sinceSeq, { headers: { Accept: "application/json" } });
@@ -139,7 +141,7 @@ function rebuildGraph() {
     const fixed = !!(d.pos && isFinite(d.pos.x) && isFinite(d.pos.y) && isFinite(d.pos.z));
     const n = { id: row.id, type, name: String(d.name || row.id), summary: String(d.summary || ""),
       x: fixed ? d.pos.x : 0, y: fixed ? d.pos.y : 0, z: fixed ? d.pos.z : 0, fixed, u: null, beat: 0, band: -1, ring: null,
-      deg: 0, updated_at: row.updated_at, raw: d };
+      deg: 0, updated_at: row.updated_at, by: row.updated_by || null, raw: d };
     nodes.push(n);
     byId.set(n.id, n);
   }
@@ -376,12 +378,20 @@ function buildScene() {
     }
   }
   selRing.visible = false; group.add(selRing);
+  for (const s of presRings) group.add(s);
   placeRing();
   applyVisibility();
 }
 const selRing = new THREE.Sprite(new THREE.SpriteMaterial({ map: selRingTex, color: 0xE9DEF7, transparent: true,
   depthWrite: false, blending: THREE.AdditiveBlending, opacity: .7 }));
 selRing.renderOrder = 3;
+// One ring per other writer (up to three), tinted in that writer's color.
+const presRings = [0, 1, 2].map(() => {
+  const s = new THREE.Sprite(new THREE.SpriteMaterial({ map: selRingTex, color: 0xffffff, transparent: true, depthWrite: false,
+    blending: THREE.AdditiveBlending, opacity: 0 }));
+  s.renderOrder = 3; s.visible = false;
+  return s;
+});
 function applyVisibility() {
   for (const o of objs) { const v = !hidden.has(o.n.type); o.sprite.visible = v; if (o.glow) o.glow.visible = v; }
   for (const l of linkObjs) l.line.visible = !hidden.has(l.link.a.type) && !hidden.has(l.link.b.type);
@@ -459,7 +469,7 @@ function showDetail() {
     n.u == null ? el("p", { class: "dim" }, "No story time yet (outer ring)") : el("p", null, whenText(n)),
     el("div", { class: "f" }, "Connected to (" + nb.length + ")"),
     nb.length ? list : el("p", { class: "dim" }, "No links yet."),
-    el("div", { class: "f" }, "Last changed"), el("p", null, relTime(n.updated_at)),
+    el("div", { class: "f" }, "Last changed"), el("p", null, relTime(n.updated_at) + byText(n.by)),
     el("div", { class: "acts" },
       el("button", { type: "button", onclick: () => startEdit(n) }, "Edit"),
       el("button", { type: "button", class: "quiet", onclick: () => askHide(n) }, "Hide")));
@@ -482,6 +492,7 @@ function select(id) {
   if (n) goal.set(n.x, n.y, n.z);
   refreshLinkEmphasis();
   showDetail();
+  pingSoon();
 }
 function refreshLinkEmphasis() {
   for (const l of linkObjs) l.sel = !!selectedId && (l.link.a.id === selectedId || l.link.b.id === selectedId);
@@ -541,7 +552,7 @@ function toast(msg, bad) {
   toastTimer = setTimeout(() => { t.className = ""; }, 6000);
 }
 function writeFailure(r) {
-  if (r.status === 401) toast("Your sign-in expired. Reload and sign in again. Your edits are still in the form.", true);
+  if (r.status === 401) toast("Your sign-in ended. Sign in again in a new tab, then press Save again. Your edits are still in this form.", true);
   else if (r.status === 400 && r.json && r.json.message) toast("The server refused that: " + r.json.message, true);
   else toast("Could not save. Your edits are still in the form.", true);
 }
@@ -670,7 +681,7 @@ async function processImageFile(file) {
 }
 function imagesBlock(n) {
   const ims = imagesOf(n.raw);
-  if (!ims.length) return null;
+  if (!ims.length) return document.createDocumentFragment(); // empty, not null: replaceChildren would print "null"
   const row = el("div", { class: "thumbrow big" });
   ims.forEach((im, i) => row.append(el("button", { type: "button", class: "tb", "aria-label": "View image " + (i + 1) + (im.caption ? ": " + im.caption : ""), onclick: () => openLightbox(ims, i) },
     el("img", { src: safeJpeg(im.thumb) ? im.thumb : im.src, alt: im.caption || "" }))));
@@ -699,11 +710,13 @@ function startEdit(n) {
   editing.imgs = deepCopy(imagesOf(editing.base)); // working copy of the images while editing
   if (!n) { selectedId = null; refreshLinkEmphasis(); }
   renderEditor();
+  pingSoon();
 }
 function cancelEdit() {
   if (!editing || !confirmDiscard()) return;
   editing = null;
   showDetail();
+  pingSoon();
 }
 function renderEditor() {
   const d = $("detail"), base = editing.base;
@@ -816,7 +829,7 @@ function updateEditWarn() {
   const w = $("f-warn");
   if (!editing || !w) return;
   const row = !editing.isNew && model.rows.get(editing.id);
-  if (row && row.rev > editing.baseRev) { w.hidden = false; w.textContent = "Someone else saved this node since you started. If you save, you will be asked how to combine both versions."; }
+  if (row && row.rev > editing.baseRev) { w.hidden = false; w.textContent = (byName(row.updated_by) || "Someone else") + " saved this node since you started. If you save, you will be asked how to combine both versions."; }
   else w.hidden = true;
 }
 function setBusy(b) { const s = $("f-save"); if (s) s.disabled = b; }
@@ -846,6 +859,7 @@ async function attemptSave(ed, data, baseRev) {
 /* side-by-side conflict dialog */
 function showConflict(ed, mine, current) {
   const b = fieldsOf(ed.base), m = fieldsOf(mine), t = fieldsOf(current.data || {});
+  const theirName = byName(current.updated_by); // empty in shared-password mode
   const diff = FIELDS.filter((f) => m[f] !== t[f]);
   const choice = {};
   for (const f of diff) { if (m[f] === b[f]) choice[f] = "theirs"; else if (t[f] === b[f]) choice[f] = "mine"; }
@@ -860,11 +874,11 @@ function showConflict(ed, mine, current) {
   const real = diff.filter((f) => m[f] !== b[f] && t[f] !== b[f] && !combine.has(f));
   const body = el("div");
   body.append(el("p", { class: "dim" },
-    "Someone saved this node while you were editing. " + (real.length ? real.length + " field(s) were changed by both of you, so you must choose. " : "You changed different fields, so both sets of changes can be kept. ") +
+    (theirName || "Someone") + " saved this node while you were editing. " + (real.length ? real.length + " field(s) were changed by both of you, so you must choose. " : "You changed different fields, so both sets of changes can be kept. ") +
     "Nothing is saved until you press Apply."));
   if (current.hidden) body.append(el("p", { class: "warn" }, "This node is currently hidden. Saving keeps it hidden."));
   const grid = el("div", { class: "cgrid" });
-  grid.append(el("div", { class: "ch" }, "Field"), el("div", { class: "ch" }, "Yours"), el("div", { class: "ch" }, "Theirs (latest)"));
+  grid.append(el("div", { class: "ch" }, "Field"), el("div", { class: "ch" }, "Yours"), el("div", { class: "ch" }, theirName ? "Theirs (" + theirName + ")" : "Theirs (latest)"));
   const cells = {};
   const refresh = () => {
     ui.btns.apply.disabled = !diff.every((f) => choice[f]);
@@ -887,7 +901,7 @@ function showConflict(ed, mine, current) {
       const rb = el("input", { type: "radio", name: "c-" + f, "aria-label": FIELD_LABEL[f] + ": keep " + who });
       rb.checked = choice[f] === who;
       rb.addEventListener("change", () => { choice[f] = who; refresh(); });
-      const hint = who === "mine" && m[f] !== b[f] && t[f] === b[f] ? "Only you changed this" : who === "theirs" && t[f] !== b[f] && m[f] === b[f] ? "Only they changed this" : "";
+      const hint = who === "mine" && m[f] !== b[f] && t[f] === b[f] ? "Only you changed this" : who === "theirs" && t[f] !== b[f] && m[f] === b[f] ? "Only " + (theirName || "they") + " changed this" : "";
       return el("label", { class: "cc pick" }, rb, el("div", null, fieldDisplay(f, data), hint ? el("small", null, hint) : null));
     };
     const cm = mk("mine", mine), ct = mk("theirs", current.data || {});
@@ -1059,13 +1073,29 @@ function frame(now) {
     selRing.scale.setScalar(so.R * (3.4 + pr * 2.2)); selRing.material.opacity = calm ? .6 : .75 * (1 - pr * .85);
   } else selRing.visible = false;
 
+  // rings for the other writers, on whatever node each is looking at
+  const presShow = [];
+  if (me) for (const p of peers) {
+    if (p.id === me.writer.id || !p.focus || presShow.length >= presRings.length) continue;
+    const po = objs.byId && objs.byId.get(p.focus);
+    if (po && po.sprite.visible) presShow.push({ p, o: po });
+  }
+  presRings.forEach((s, i) => {
+    const e = presShow[i];
+    if (!e) { s.visible = false; return; }
+    const ph = calm ? .5 : (time * .5 + i * .31) % 1;
+    s.visible = true; s.position.copy(e.o.sprite.position); s.scale.setScalar(e.o.R * (3.1 + ph * 1.6));
+    s.material.color.set(e.p.color); s.material.opacity = .85 * (1 - ph * .7);
+  });
+
   renderer.render(scene, camera);
 
   // labels
   let li = 0;
-  const showLabel = (txt, pos, cls, dy) => {
+  const showLabel = (txt, pos, cls, dy, color) => {
     const s = toScreen(pos); if (!s || li >= 24) return;
     const d = labelAt(li++); d.textContent = txt; d.className = "lb" + (cls ? " " + cls : "");
+    d.style.color = color || "";
     d.style.display = "block";
     d.style.transform = `translate(${Math.round(s.x)}px,${Math.round(s.y + dy)}px) translateX(-50%)`;
   };
@@ -1080,6 +1110,7 @@ function frame(now) {
     const ex = Math.sin(cam.yaw) * (HX.R + 64), ez = Math.cos(cam.yaw) * (HX.R + 64);
     for (const b of graph.lay.bands) if (b.name) showLabel(b.name, tmpE.set(ex, yOfU((b.u0 + b.u1) / 2, graph.lay.U), ez), "era", 0);
   }
+  for (const e of presShow) showLabel(e.p.name + (e.p.editing ? " is editing" : ""), e.o.sprite.position, "pres", -(e.o.R * pxPerUnit(e.o.sprite.position) * 2.3 + 12), e.p.color);
   for (; li < labelPool.length; li++) labelPool[li].style.display = "none";
 
   drawMini();
@@ -1106,6 +1137,7 @@ function drawStrip() {
   if (st.width !== Math.round(cssW * dpr) || st.height !== Math.round(cssH * dpr)) { st.width = Math.round(cssW * dpr); st.height = Math.round(cssH * dpr); }
   const c = sctx, g = stripGeometry(cssW), base = cssH * .68;
   stGeom = g; stTicks = [];
+  const oth = othersFocus();
   c.setTransform(dpr, 0, 0, dpr, 0, 0); c.clearRect(0, 0, cssW, cssH);
   c.textAlign = "left"; c.font = '10px "Cinzel", Georgia, serif';
   if (lay.timed.length) {
@@ -1135,6 +1167,8 @@ function drawStrip() {
     c.globalCompositeOperation = "source-over"; c.fillStyle = sel ? "#fff" : t.hex;
     c.beginPath(); c.arc(x, base, sel ? 4.6 : 3.2, 0, TAU); c.fill();
     c.globalAlpha = 1;
+    const ows = oth.get(n.id); // rings in the other writers' colors
+    if (ows) ows.forEach((col, k) => { c.strokeStyle = col; c.lineWidth = 1.8; c.beginPath(); c.arc(x, base, 8.5 + k * 3, 0, TAU); c.stroke(); });
   };
   for (const n of lay.timed) dot(n, stX(n.u, g));
   lay.ringNodes.forEach((n, i) => dot(n, g.ringX0 + ((i + .5) / lay.ringNodes.length) * g.ringW));
@@ -1193,6 +1227,64 @@ function drawMini() {
   mctx.fillStyle = "#E6DDF3"; mctx.beginPath(); mctx.arc(cx, cz, 3, 0, TAU); mctx.fill();
 }
 
+/* ---------- identity and presence ---------- */
+const byName = (id) => {
+  if (!id || !me || me.mode !== "writers") return "";
+  if (id === "shared") return "Shared access";
+  const w = me.writers.find((x) => x.id === id);
+  return w ? w.name : "a former writer";
+};
+const byText = (id) => (byName(id) ? " by " + byName(id) : "");
+async function loadMe() {
+  try {
+    const r = await fetch("/api/me", { headers: { Accept: "application/json" } });
+    if (r.status === 401) { location.replace("/login.html"); return new Promise(() => {}); } // stay put while we leave
+    if (r.ok) me = await r.json();
+  } catch (e) { /* offline: the first state load will show the error */ }
+}
+// node id -> colors of the other writers currently looking at it
+function othersFocus() {
+  const m = new Map();
+  if (me) for (const p of peers) if (p.id !== me.writer.id && p.focus) { if (!m.has(p.focus)) m.set(p.focus, []); m.get(p.focus).push(p.color); }
+  return m;
+}
+function renderPresence() {
+  const box = $("presence");
+  if (!me || me.mode !== "writers") { box.hidden = true; return; }
+  box.hidden = false;
+  const on = new Map(peers.map((p) => [p.id, p]));
+  const people = [...me.writers];
+  if (!people.some((w) => w.id === me.writer.id)) people.unshift(me.writer); // the emergency "Shared access" session
+  const kids = people.map((w) => {
+    const isMe = w.id === me.writer.id, p = on.get(w.id), live = isMe || !!p;
+    const note = isMe ? "you" : p && p.editing ? "editing" : "";
+    return el("div", { class: "pw" + (live ? "" : " off"), style: "color:" + w.color, title: w.name + (isMe ? " (you)" : live ? " is online" : " is offline") },
+      el("i"), el("span", { style: "color:var(--text)" }, w.name), note ? el("small", null, note) : null);
+  });
+  kids.push(el("button", { type: "button", onclick: signOut }, "Sign out"));
+  box.replaceChildren(...kids);
+}
+async function signOut() {
+  await apiWrite("POST", "/api/logout", {});
+  location.replace("/login.html");
+}
+let pingTimer = 0;
+async function sendPresence() {
+  if (!me || me.mode !== "writers") return;
+  const focus = editing && !editing.isNew ? editing.id : selectedId;
+  const r = await apiWrite("POST", "/api/presence", { focus: focus || null, editing: !!editing });
+  if (r.status === 200 && r.json) { peers = r.json.online || []; renderPresence(); }
+  else if (r.status === 401) location.replace("/login.html");
+}
+function pingSoon() { clearTimeout(pingTimer); pingTimer = setTimeout(sendPresence, 350); }
+function startPresence() {
+  if (!me || me.mode !== "writers") return;
+  renderPresence();
+  sendPresence();
+  setInterval(() => { if (!document.hidden) sendPresence(); }, 5000); // a hidden tab goes quiet and drops off after about 25 seconds
+  document.addEventListener("visibilitychange", () => { if (!document.hidden) sendPresence(); });
+}
+
 /* ---------- start and sync ---------- */
 function refreshAll(first) {
   const keep = selectedId;
@@ -1216,6 +1308,7 @@ async function poll(first) {
     online = true; lastSync = Date.now();
     if (first || changed) refreshAll(first);
   } catch (e) {
+    if (e.status === 401 && me && me.mode === "writers") { location.replace("/login.html"); return; }
     online = false;
     if (first) {
       showState("Could not load the map", e.status === 401 ? "Sign in with the shared password, then reload." : "The server did not answer. Check your connection and reload.", true);
@@ -1226,9 +1319,10 @@ async function poll(first) {
 
 setCalm(mq.matches);
 resize(); buildDust();
-poll(true).then(() => {
+loadMe().then(() => poll(true)).then(() => {
   setInterval(() => { if (!document.hidden) poll(false); }, POLL_MS);
   setInterval(setSync, 15000);
+  startPresence();
 });
 requestAnimationFrame(frame);
 })();

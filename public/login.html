@@ -1,0 +1,30 @@
+<!doctype html>
+<!-- The Throat sign-in page. Signed Maridizzle -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Sign in</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@500;700&family=Crimson+Pro:ital,wght@0,400;0,600;1,400&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="css/throat.css">
+</head>
+<body class="q2 loginpage">
+<div class="vig"></div>
+<div class="grain"></div>
+<main class="card login">
+  <h1>THE THROAT</h1>
+  <p class="sub">Sign in to continue.</p>
+  <form id="lf" autocomplete="on">
+    <label for="ln">Name</label>
+    <input id="ln" name="username" type="text" autocomplete="username" required maxlength="100" autofocus>
+    <label for="lp">Password</label>
+    <input id="lp" name="password" type="password" autocomplete="current-password" required maxlength="200">
+    <button id="lb" type="submit">Sign in</button>
+    <p id="lerr" role="alert"></p>
+  </form>
+</main>
+<script src="js/login.js"></script>
+</body>
+</html>

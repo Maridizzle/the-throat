@@ -143,7 +143,35 @@ body.calm #detail .thumbrow.big .tb img{transition:none}
   box-shadow:0 12px 50px rgba(0,0,0,.8)}
 .lbcap{margin:10px 0 2px;font-size:17px;overflow-wrap:anywhere}
 .lbbox small{color:var(--muted)}
-#toast{position:fixed;top:16px;left:50%;transform:translate(-50%,-12px);z-index:60;max-width:min(560px,calc(100vw - 32px));
+/* sign-in page */
+body.loginpage{overflow:auto;display:grid;place-items:center;min-height:100vh;padding:16px}
+.card{background:linear-gradient(160deg,rgba(43,26,66,.78),rgba(26,15,38,.9));border:1px solid rgba(185,166,214,.2);border-radius:16px;
+  box-shadow:0 20px 70px rgba(5,2,12,.8),inset 0 1px 0 rgba(185,166,214,.16),inset 0 0 50px rgba(75,79,168,.12);
+  backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px)}
+.login{width:min(380px,100%);padding:28px 28px 24px;position:relative;z-index:2}
+.login h1{margin:0;font-size:20px;color:var(--thistle);text-shadow:0 0 18px rgba(185,166,214,.6);text-align:center}
+.login .sub{margin:6px 0 18px;text-align:center;color:var(--muted);font-style:italic}
+.login label{display:block;margin:12px 0 4px;font-size:11px;color:var(--muted);letter-spacing:.14em;text-transform:uppercase}
+.login input{width:100%;background:rgba(11,7,20,.75);border:1px solid rgba(185,166,214,.28);border-radius:8px;padding:9px 11px;font-size:17px}
+.login button{width:100%;margin-top:18px;padding:10px;border-radius:10px;cursor:pointer;font-size:16px;letter-spacing:.06em;
+  background:linear-gradient(160deg,#4A2C7A,#2B1A42);border:1px solid rgba(185,166,214,.55)}
+.login button:hover:not(:disabled){box-shadow:0 0 16px rgba(185,166,214,.4)}
+.login button:disabled{opacity:.55;cursor:wait}
+.login #lerr{min-height:22px;margin:12px 0 0;text-align:center;color:#E3A8D6;font-size:15px}
+/* who is online, top centre; on small screens a compact corner strip */
+#presence{top:16px;left:50%;transform:translateX(-50%);padding:9px 16px;display:flex;gap:16px;align-items:center;font-size:14px;max-width:calc(100vw - 420px)}
+#presence .pw{display:flex;align-items:center;gap:7px;letter-spacing:.06em;white-space:nowrap}
+#presence i{width:9px;height:9px;border-radius:50%;display:inline-block;background:currentColor;box-shadow:0 0 8px currentColor}
+#presence .pw.off{opacity:.42}
+#presence .pw.off i{box-shadow:none;background:transparent;border:1px solid currentColor}
+#presence .pw small{color:var(--muted);font-size:12px}
+#presence button{background:rgba(11,7,20,.7);border:1px solid rgba(185,166,214,.3);border-radius:8px;padding:3px 11px;cursor:pointer;font-size:13px}
+#presence button:hover{border-color:var(--thistle);box-shadow:0 0 12px rgba(185,166,214,.35)}
+body:not(.calm) #presence .pw:not(.off) i{animation:pl 2.4s ease-in-out infinite}
+@keyframes pl{0%,100%{box-shadow:0 0 4px currentColor}50%{box-shadow:0 0 12px 2px currentColor}}
+#labels .pres{font-family:"Cinzel",Georgia,serif;font-size:10.5px;letter-spacing:.14em;text-transform:uppercase;font-weight:700;
+  padding:2px 9px;border-radius:99px;background:rgba(26,15,38,.88);border:1px solid currentColor;text-shadow:none}
+#toast{position:fixed;top:72px;left:50%;transform:translate(-50%,-12px);z-index:60;max-width:min(560px,calc(100vw - 32px));
   padding:10px 18px;border-radius:12px;font-size:15px;opacity:0;pointer-events:none;transition:opacity .25s,transform .25s;
   background:rgba(26,15,38,.96);border:1px solid rgba(185,166,214,.35);box-shadow:0 10px 40px rgba(0,0,0,.7)}
 #toast.show{opacity:1;transform:translate(-50%,0)}
@@ -161,6 +189,8 @@ button:focus-visible,select:focus-visible,input:focus-visible,textarea:focus-vis
   .cgrid .ch:first-child{display:none}
   .cgrid .cl{grid-column:1 / -1;padding:6px 2px 0}
   #hint,#mini{display:none}
+  #presence{left:auto;right:16px;transform:none;top:16px;padding:8px 12px;gap:10px;max-width:calc(100vw - 210px)}
+  #presence .pw span{display:none}
   #strip{bottom:auto;top:88px;left:16px;right:16px;transform:none;width:auto;min-width:0;height:62px}
   #controls{bottom:12px;gap:8px 12px;font-size:13px;flex-wrap:wrap;justify-content:center;width:calc(100vw - 32px);white-space:normal}
 }
