@@ -10,8 +10,8 @@ const express = require("express");
 const path = require("path");
 const fs = require("fs/promises");
 const { existsSync } = require("fs");
-const crypto = require("crypto");
 const { Pool } = require("pg");
+const { createAuth } = require("./auth");
 
 const app = express();
 const PORT = process.env.PORT || 3002;
@@ -32,33 +32,22 @@ const BACKUP_ID_RE = /^[0-9A-Za-z_\-]+$/;
 // Health check sits before auth so Railway can probe it. Reveals nothing.
 app.get("/api/health", (req, res) => res.json({ ok: true }));
 
-// ── Password protection ──────────────────────────────────
-// Shared password via Basic Auth. Any username is accepted. Set APP_PASSWORD
-// in the Railway service's env vars.
-function requireAuth(req, res, next) {
-  const expected = process.env.APP_PASSWORD;
-  if (!expected) {
-    console.error("APP_PASSWORD env var not set, refusing all requests.");
-    return res.status(503).send("Server misconfigured: APP_PASSWORD is not set.");
-  }
-  const header = req.headers.authorization || "";
-  const [scheme, encoded] = header.split(" ");
-  const provided =
-    scheme === "Basic" && encoded
-      ? Buffer.from(encoded, "base64").toString("utf8").split(":").slice(1).join(":")
-      : "";
-  const expectedBuf = Buffer.from(expected);
-  const providedBuf = Buffer.from(provided);
-  const match =
-    expectedBuf.length === providedBuf.length && crypto.timingSafeEqual(expectedBuf, providedBuf);
-  if (!match) {
-    res.set("WWW-Authenticate", 'Basic realm="The Throat", charset="UTF-8"');
-    return res.status(401).send("Authentication required.");
-  }
-  next();
+// ── Sign-in ──────────────────────────────────────────────
+// See auth.js. With no WRITER_n_* variables this is the old shared password
+// (APP_PASSWORD, Basic Auth). With them it is the sign-in page and a signed
+// cookie, and every write is stamped with the signed-in writer.
+let authn;
+try {
+  authn = createAuth(process.env);
+} catch (e) {
+  console.error("Startup failed: " + e.message);
+  process.exit(1);
 }
-app.use(requireAuth);
+console.log("Sign-in mode: " + authn.mode + (authn.mode === "writers" ? " (" + authn.writers.length + " writer(s))" : ""));
+app.set("trust proxy", 1); // Railway's proxy sits in front, so req.ip is the real visitor
+app.use(authn.middleware);
 app.use(express.json({ limit: "12mb" }));
+authn.mount(app);
 app.use(express.static(path.join(__dirname, "public")));
 
 // ── Validation ───────────────────────────────────────────
@@ -147,7 +136,7 @@ function makeFileStore() {
       }
     });
 
-  function guarded(table, key, baseRev, build) {
+  function guarded(table, key, baseRev, by, build) {
     return mutate((s) => {
       const cur = s[table][key];
       if (baseRev == null) {
@@ -160,6 +149,7 @@ function makeFileStore() {
       row.rev = cur ? cur.rev + 1 : 1;
       row.seq = ++s.seq;
       row.updated_at = new Date().toISOString();
+      row.updated_by = by || null;
       s[table][key] = row;
       return { row };
     });
@@ -180,14 +170,14 @@ function makeFileStore() {
         meta: Object.values(s.meta).filter((r) => r.seq > since),
       };
     },
-    putNode(id, data, baseRev) {
-      return guarded("nodes", id, baseRev, (cur) => ({ id, data, hidden: cur ? cur.hidden : false }));
+    putNode(id, data, baseRev, by) {
+      return guarded("nodes", id, baseRev, by, (cur) => ({ id, data, hidden: cur ? cur.hidden : false }));
     },
-    setHidden(id, hidden, baseRev) {
-      return guarded("nodes", id, baseRev, (cur) => ({ id, data: cur.data, hidden }));
+    setHidden(id, hidden, baseRev, by) {
+      return guarded("nodes", id, baseRev, by, (cur) => ({ id, data: cur.data, hidden }));
     },
-    putMeta(key, data, baseRev) {
-      return guarded("meta", key, baseRev, () => ({ key, data }));
+    putMeta(key, data, baseRev, by) {
+      return guarded("meta", key, baseRev, by, () => ({ key, data }));
     },
     async snapshot() {
       const s = await load();
@@ -197,23 +187,23 @@ function makeFileStore() {
       };
     },
     // Restore never removes rows. Nodes absent from the snapshot are hidden.
-    replaceAll(snap) {
+    replaceAll(snap, by) {
       return mutate((s) => {
         const keep = new Set(snap.nodes.map((n) => n.id));
         const stamp = new Date().toISOString();
         for (const n of snap.nodes) {
           const cur = s.nodes[n.id];
-          s.nodes[n.id] = { id: n.id, data: n.data, hidden: !!n.hidden, rev: cur ? cur.rev + 1 : 1, seq: ++s.seq, updated_at: stamp };
+          s.nodes[n.id] = { id: n.id, data: n.data, hidden: !!n.hidden, rev: cur ? cur.rev + 1 : 1, seq: ++s.seq, updated_at: stamp, updated_by: by || null };
         }
         for (const id of Object.keys(s.nodes)) {
           if (!keep.has(id) && !s.nodes[id].hidden) {
             const cur = s.nodes[id];
-            s.nodes[id] = { ...cur, hidden: true, rev: cur.rev + 1, seq: ++s.seq, updated_at: stamp };
+            s.nodes[id] = { ...cur, hidden: true, rev: cur.rev + 1, seq: ++s.seq, updated_at: stamp, updated_by: by || null };
           }
         }
         for (const m of snap.meta || []) {
           const cur = s.meta[m.key];
-          s.meta[m.key] = { key: m.key, data: m.data, rev: cur ? cur.rev + 1 : 1, seq: ++s.seq, updated_at: stamp };
+          s.meta[m.key] = { key: m.key, data: m.data, rev: cur ? cur.rev + 1 : 1, seq: ++s.seq, updated_at: stamp, updated_by: by || null };
         }
         return { done: true };
       });
@@ -222,24 +212,24 @@ function makeFileStore() {
 }
 
 function makePgStore(pool) {
-  const outNode = (r) => ({ id: r.id, data: r.data, rev: r.rev, seq: Number(r.seq), hidden: r.hidden, updated_at: r.updated_at });
-  const outMeta = (r) => ({ key: r.key, data: r.data, rev: r.rev, seq: Number(r.seq), updated_at: r.updated_at });
+  const outNode = (r) => ({ id: r.id, data: r.data, rev: r.rev, seq: Number(r.seq), hidden: r.hidden, updated_at: r.updated_at, updated_by: r.updated_by || null });
+  const outMeta = (r) => ({ key: r.key, data: r.data, rev: r.rev, seq: Number(r.seq), updated_at: r.updated_at, updated_by: r.updated_by || null });
 
-  async function guardedUpsert(table, keyCol, out, key, data, baseRev) {
+  async function guardedUpsert(table, keyCol, out, key, data, baseRev, by) {
     if (baseRev == null) {
       const r = await pool.query(
-        `INSERT INTO ${table} (${keyCol}, data, rev, seq) VALUES ($1, $2, 1, nextval('throat_seq'))
+        `INSERT INTO ${table} (${keyCol}, data, rev, seq, updated_by) VALUES ($1, $2, 1, nextval('throat_seq'), $3)
          ON CONFLICT (${keyCol}) DO NOTHING RETURNING *`,
-        [key, data]
+        [key, data, by || null]
       );
       if (r.rows.length) return { row: out(r.rows[0]) };
       const c = await pool.query(`SELECT * FROM ${table} WHERE ${keyCol} = $1`, [key]);
       return { conflict: out(c.rows[0]) };
     }
     const r = await pool.query(
-      `UPDATE ${table} SET data = $2, rev = rev + 1, seq = nextval('throat_seq'), updated_at = now()
+      `UPDATE ${table} SET data = $2, rev = rev + 1, seq = nextval('throat_seq'), updated_at = now(), updated_by = $4
        WHERE ${keyCol} = $1 AND rev = $3 RETURNING *`,
-      [key, data, baseRev]
+      [key, data, baseRev, by || null]
     );
     if (r.rows.length) return { row: out(r.rows[0]) };
     const c = await pool.query(`SELECT * FROM ${table} WHERE ${keyCol} = $1`, [key]);
@@ -277,6 +267,10 @@ function makePgStore(pool) {
           created_at TIMESTAMPTZ NOT NULL DEFAULT now()
         );`);
       await pool.query("CREATE INDEX IF NOT EXISTS throat_backups_created_idx ON throat_backups (created_at DESC);");
+      // Writer attribution. Added to existing tables without touching existing rows.
+      await pool.query("ALTER TABLE throat_nodes ADD COLUMN IF NOT EXISTS updated_by TEXT;");
+      await pool.query("ALTER TABLE throat_meta ADD COLUMN IF NOT EXISTS updated_by TEXT;");
+      await pool.query("ALTER TABLE throat_backups ADD COLUMN IF NOT EXISTS created_by TEXT;");
       console.log("DB ready.");
     },
     async getState(sinceSeq) {
@@ -288,52 +282,52 @@ function makePgStore(pool) {
       );
       return { seq: Number(top.rows[0].seq), nodes: n.rows.map(outNode), meta: m.rows.map(outMeta) };
     },
-    putNode(id, data, baseRev) {
-      return guardedUpsert("throat_nodes", "id", outNode, id, data, baseRev);
+    putNode(id, data, baseRev, by) {
+      return guardedUpsert("throat_nodes", "id", outNode, id, data, baseRev, by);
     },
-    async setHidden(id, hidden, baseRev) {
+    async setHidden(id, hidden, baseRev, by) {
       const r = await pool.query(
-        `UPDATE throat_nodes SET hidden = $2, rev = rev + 1, seq = nextval('throat_seq'), updated_at = now()
+        `UPDATE throat_nodes SET hidden = $2, rev = rev + 1, seq = nextval('throat_seq'), updated_at = now(), updated_by = $4
          WHERE id = $1 AND rev = $3 RETURNING *`,
-        [id, hidden, baseRev]
+        [id, hidden, baseRev, by || null]
       );
       if (r.rows.length) return { row: outNode(r.rows[0]) };
       const c = await pool.query("SELECT * FROM throat_nodes WHERE id = $1", [id]);
       if (!c.rows.length) return { notFound: true };
       return { conflict: outNode(c.rows[0]) };
     },
-    putMeta(key, data, baseRev) {
-      return guardedUpsert("throat_meta", "key", outMeta, key, data, baseRev);
+    putMeta(key, data, baseRev, by) {
+      return guardedUpsert("throat_meta", "key", outMeta, key, data, baseRev, by);
     },
     async snapshot() {
       const n = await pool.query("SELECT id, data, hidden FROM throat_nodes ORDER BY id");
       const m = await pool.query("SELECT key, data FROM throat_meta ORDER BY key");
       return { nodes: n.rows, meta: m.rows };
     },
-    async replaceAll(snap) {
+    async replaceAll(snap, by) {
       const client = await pool.connect();
       try {
         await client.query("BEGIN");
         const keep = snap.nodes.map((n) => n.id);
         for (const n of snap.nodes) {
           await client.query(
-            `INSERT INTO throat_nodes (id, data, hidden, rev, seq) VALUES ($1, $2, $3, 1, nextval('throat_seq'))
+            `INSERT INTO throat_nodes (id, data, hidden, rev, seq, updated_by) VALUES ($1, $2, $3, 1, nextval('throat_seq'), $4)
              ON CONFLICT (id) DO UPDATE SET data = EXCLUDED.data, hidden = EXCLUDED.hidden,
-               rev = throat_nodes.rev + 1, seq = nextval('throat_seq'), updated_at = now()`,
-            [n.id, n.data, !!n.hidden]
+               rev = throat_nodes.rev + 1, seq = nextval('throat_seq'), updated_at = now(), updated_by = EXCLUDED.updated_by`,
+            [n.id, n.data, !!n.hidden, by || null]
           );
         }
         await client.query(
-          `UPDATE throat_nodes SET hidden = true, rev = rev + 1, seq = nextval('throat_seq'), updated_at = now()
+          `UPDATE throat_nodes SET hidden = true, rev = rev + 1, seq = nextval('throat_seq'), updated_at = now(), updated_by = $2
            WHERE NOT (id = ANY($1::text[])) AND NOT hidden`,
-          [keep]
+          [keep, by || null]
         );
         for (const m of snap.meta || []) {
           await client.query(
-            `INSERT INTO throat_meta (key, data, rev, seq) VALUES ($1, $2, 1, nextval('throat_seq'))
+            `INSERT INTO throat_meta (key, data, rev, seq, updated_by) VALUES ($1, $2, 1, nextval('throat_seq'), $3)
              ON CONFLICT (key) DO UPDATE SET data = EXCLUDED.data, rev = throat_meta.rev + 1,
-               seq = nextval('throat_seq'), updated_at = now()`,
-            [m.key, m.data]
+               seq = nextval('throat_seq'), updated_at = now(), updated_by = EXCLUDED.updated_by`,
+            [m.key, m.data, by || null]
           );
         }
         await client.query("COMMIT");
@@ -373,14 +367,17 @@ const BACKUP_REASONS = ["periodic", "before_hide", "before_restore", "manual"];
 
 const visibleCount = (snap) => (snap && Array.isArray(snap.nodes) ? snap.nodes.filter((n) => !n.hidden).length : 0);
 
-function backupFileName(reason, count) {
+// For backups made on someone's action, `by` is that writer; for the periodic
+// kind it is the writer whose save triggered it.
+function backupFileName(reason, count, by) {
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
   const salt = Math.random().toString(36).slice(2, 6);
-  return stamp + "-" + salt + "__" + reason + "__" + count + ".json";
+  const who = String(by || "").replace(/[^0-9A-Za-z_-]/g, "");
+  return stamp + "-" + salt + "__" + reason + "__" + count + (who ? "__" + who : "") + ".json";
 }
 function parseBackupId(id) {
   const parts = id.split("__");
-  if (parts.length !== 3) return null;
+  if (parts.length !== 3 && parts.length !== 4) return null;
   const iso = parts[0]
     .slice(0, 23)
     .replace(/^(\d{4})-(\d{2})-(\d{2})T(\d{2})-(\d{2})-(\d{2})-(\d{3})$/, "$1-$2-$3T$4:$5:$6.$7Z");
@@ -390,23 +387,24 @@ function parseBackupId(id) {
     created_at: isNaN(at.getTime()) ? new Date().toISOString() : at.toISOString(),
     reason: parts[1],
     node_count: parseInt(parts[2], 10) || 0,
+    created_by: parts[3] || null,
   };
 }
 
-async function writeBackup(snap, reason) {
+async function writeBackup(snap, reason, by) {
   const count = visibleCount(snap);
   if (!usingPostgres) {
-    const name = backupFileName(reason, count);
+    const name = backupFileName(reason, count, by);
     await fs.mkdir(BACKUP_DIR, { recursive: true });
     await fs.writeFile(path.join(BACKUP_DIR, name), JSON.stringify({ data: snap }), "utf8");
     return parseBackupId(name.replace(/\.json$/, ""));
   }
   const r = await pool.query(
-    "INSERT INTO throat_backups (data, node_count, reason) VALUES ($1, $2, $3) RETURNING id, node_count, reason, created_at",
-    [snap, count, reason]
+    "INSERT INTO throat_backups (data, node_count, reason, created_by) VALUES ($1, $2, $3, $4) RETURNING id, node_count, reason, created_at, created_by",
+    [snap, count, reason, by || null]
   );
   const row = r.rows[0];
-  return { id: String(row.id), created_at: row.created_at, reason: row.reason, node_count: row.node_count };
+  return { id: String(row.id), created_at: row.created_at, reason: row.reason, node_count: row.node_count, created_by: row.created_by || null };
 }
 
 async function listBackups() {
@@ -423,8 +421,8 @@ async function listBackups() {
       .filter(Boolean)
       .sort((a, b) => b.id.localeCompare(a.id));
   }
-  const r = await pool.query("SELECT id, node_count, reason, created_at FROM throat_backups ORDER BY created_at DESC, id DESC");
-  return r.rows.map((row) => ({ id: String(row.id), created_at: row.created_at, reason: row.reason, node_count: row.node_count }));
+  const r = await pool.query("SELECT id, node_count, reason, created_at, created_by FROM throat_backups ORDER BY created_at DESC, id DESC");
+  return r.rows.map((row) => ({ id: String(row.id), created_at: row.created_at, reason: row.reason, node_count: row.node_count, created_by: row.created_by || null }));
 }
 
 async function getBackup(id) {
@@ -441,10 +439,10 @@ async function getBackup(id) {
     }
   }
   if (!/^\d+$/.test(id)) return null;
-  const r = await pool.query("SELECT id, data, node_count, reason, created_at FROM throat_backups WHERE id = $1", [id]);
+  const r = await pool.query("SELECT id, data, node_count, reason, created_at, created_by FROM throat_backups WHERE id = $1", [id]);
   if (!r.rows.length) return null;
   const row = r.rows[0];
-  return { id: String(row.id), created_at: row.created_at, reason: row.reason, node_count: row.node_count, data: row.data };
+  return { id: String(row.id), created_at: row.created_at, reason: row.reason, node_count: row.node_count, created_by: row.created_by || null, data: row.data };
 }
 
 // Only runs when BACKUP_KEEP is set to a positive number.
@@ -464,7 +462,7 @@ async function pruneBackups(keep) {
 
 let lastBackupAt = 0;
 // Never lets a backup failure cost anyone a save.
-async function snapshotIf(reason) {
+async function snapshotIf(reason, by) {
   if (reason === "periodic" && Date.now() - lastBackupAt < BACKUP_PERIOD_MS) return;
   const prev = lastBackupAt;
   lastBackupAt = Date.now();
@@ -474,7 +472,7 @@ async function snapshotIf(reason) {
       lastBackupAt = prev;
       return;
     }
-    await writeBackup(snap, reason);
+    await writeBackup(snap, reason, by);
     if (BACKUP_KEEP > 0) await pruneBackups(BACKUP_KEEP);
   } catch (e) {
     lastBackupAt = prev;
@@ -508,8 +506,8 @@ app.put("/api/nodes/:id", wrap(async (req, res) => {
   if (!base.ok) return res.status(400).json({ error: "bad_base_rev" });
   const problem = checkNodeData(req.body.data);
   if (problem) return res.status(400).json({ error: "bad_payload", message: problem });
-  await snapshotIf("periodic");
-  sendWrite(res, await store.putNode(id, req.body.data, base.value));
+  await snapshotIf("periodic", req.writer.id);
+  sendWrite(res, await store.putNode(id, req.body.data, base.value, req.writer.id));
 }));
 
 // Hide and unhide are the only forms of removal. Nothing is erased.
@@ -518,16 +516,16 @@ app.post("/api/nodes/:id/hide", wrap(async (req, res) => {
   if (!ID_RE.test(id)) return res.status(400).json({ error: "bad_id" });
   const base = parseBaseRev(req.body.base_rev);
   if (!base.ok || base.value === null) return res.status(400).json({ error: "bad_base_rev" });
-  await snapshotIf("before_hide");
-  sendWrite(res, await store.setHidden(id, true, base.value));
+  await snapshotIf("before_hide", req.writer.id);
+  sendWrite(res, await store.setHidden(id, true, base.value, req.writer.id));
 }));
 app.post("/api/nodes/:id/unhide", wrap(async (req, res) => {
   const { id } = req.params;
   if (!ID_RE.test(id)) return res.status(400).json({ error: "bad_id" });
   const base = parseBaseRev(req.body.base_rev);
   if (!base.ok || base.value === null) return res.status(400).json({ error: "bad_base_rev" });
-  await snapshotIf("periodic");
-  sendWrite(res, await store.setHidden(id, false, base.value));
+  await snapshotIf("periodic", req.writer.id);
+  sendWrite(res, await store.setHidden(id, false, base.value, req.writer.id));
 }));
 
 // Shared settings such as era bands. Same revision rules as nodes.
@@ -538,8 +536,8 @@ app.put("/api/meta/:key", wrap(async (req, res) => {
   if (!base.ok) return res.status(400).json({ error: "bad_base_rev" });
   const problem = checkNodeData(req.body.data);
   if (problem) return res.status(400).json({ error: "bad_payload", message: problem });
-  await snapshotIf("periodic");
-  sendWrite(res, await store.putMeta(key, req.body.data, base.value), "meta");
+  await snapshotIf("periodic", req.writer.id);
+  sendWrite(res, await store.putMeta(key, req.body.data, base.value, req.writer.id), "meta");
 }));
 
 // ── Backup API ────────────────────────────────────────────
@@ -550,7 +548,7 @@ app.get("/api/backups", wrap(async (req, res) => {
 app.post("/api/backups", wrap(async (req, res) => {
   const snap = await store.snapshot();
   if (!snap.nodes.length && !snap.meta.length) return res.status(400).json({ error: "nothing_to_back_up" });
-  const rec = await writeBackup(snap, "manual");
+  const rec = await writeBackup(snap, "manual", req.writer.id);
   lastBackupAt = Date.now();
   if (BACKUP_KEEP > 0) await pruneBackups(BACKUP_KEEP);
   res.json({ ok: true, backup: rec });
@@ -586,8 +584,8 @@ app.post("/api/backups/:id/restore", wrap(async (req, res) => {
   if (!rec) return res.status(404).json({ error: "not_found" });
   if (!rec.data || !Array.isArray(rec.data.nodes)) return res.status(400).json({ error: "corrupt_backup" });
   const current = await store.snapshot();
-  if (current.nodes.length || current.meta.length) await writeBackup(current, "before_restore");
-  await store.replaceAll(rec.data);
+  if (current.nodes.length || current.meta.length) await writeBackup(current, "before_restore", req.writer.id);
+  await store.replaceAll(rec.data, req.writer.id);
   lastBackupAt = Date.now();
   res.json({ ok: true, restored_from: rec.id, state: await store.getState(0) });
 }));
@@ -601,6 +599,7 @@ app.use((err, req, res, next) => {
 
 // SPA fallback once the client exists.
 app.get("*", (req, res) => {
+  if (!req.writer) return res.status(404).send("Not found."); // never hand the app page to someone signed out
   const index = path.join(__dirname, "public", "index.html");
   if (existsSync(index)) return res.sendFile(index);
   res.status(404).send("Client not built yet.");
