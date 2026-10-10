@@ -1389,3 +1389,13 @@ body.rail-left-off #legend h2 .ltog { transform: rotate(180deg); margin: 0 auto;
   body.rail-left-off #legend h2 { font-size: 21px; }
   body:not(.tab-map) #strip { display: none; }
 }
+
+/* quieter map: no era dividers, dimmer backdrop inside the frame, a hint that fades, a smaller overview */
+#eraHead .ed { display: none; }
+#eraHead .et { position: absolute; top: 32px; width: 1px; height: 10px; background: rgba(217, 197, 236, .45); }
+#eraHead .eh { font-size: 13px; letter-spacing: .16em; color: rgba(217, 197, 236, .8); }
+#map-space { background: rgba(12, 8, 19, .68); }
+#map-space #hint { transition: opacity 1.2s ease; }
+#map-space #hint.fade { opacity: 0; pointer-events: none; }
+#map-space #mini canvas { width: 120px; }
+#map-space #mini.big canvas { width: min(380px, 60vw); }

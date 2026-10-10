@@ -172,7 +172,7 @@ function rebuildGraph() {
   for (const l of links) l.moving = !!(l.a.ring || l.b.ring);
   let extX = 200, extYZ = 200;
   for (const n of nodes) { extX = Math.max(extX, Math.abs(n.x)); extYZ = Math.max(extYZ, Math.hypot(n.y, n.z)); }
-  const homeDist = Math.min(3600, Math.max(560, extX * 1.55, extYZ * 2.6));
+  const homeDist = Math.min(1400, Math.max(560, Math.min(extX * 1.55, 900), extYZ * 1.6)); // a long flow runs past the frame edges, so it reads as a stream to scroll along
   graph = { nodes, byId, links, nbrs, lay, homeDist };
   syncTimeNav();
 }
@@ -645,7 +645,7 @@ function centroid() {
 
 /* input */
 let dragging = false, px = 0, py = 0, moved = 0, mx = -999, my = -999, mouseOn = false;
-cv.addEventListener("pointerdown", (e) => { cv.setPointerCapture(e.pointerId); dragging = true; cv.classList.add("drag"); px = e.clientX; py = e.clientY; moved = 0; });
+cv.addEventListener("pointerdown", (e) => { hintSeen(); cv.setPointerCapture(e.pointerId); dragging = true; cv.classList.add("drag"); px = e.clientX; py = e.clientY; moved = 0; });
 cv.addEventListener("pointermove", (e) => {
   mx = e.clientX; my = e.clientY; mouseOn = e.pointerType === "mouse";
   if (!dragging) return;
@@ -654,7 +654,15 @@ cv.addEventListener("pointermove", (e) => {
 });
 cv.addEventListener("pointerup", () => { dragging = false; cv.classList.remove("drag"); if (moved < 6) select(hoverId); });
 cv.addEventListener("pointerleave", () => { mx = my = -999; mouseOn = false; });
-cv.addEventListener("wheel", (e) => { e.preventDefault(); cam.dist = Math.max(260, Math.min(2200, cam.dist * Math.exp(e.deltaY * .0011))); }, { passive: false });
+cv.addEventListener("wheel", (e) => {
+  e.preventDefault();
+  const sideways = e.shiftKey ? e.deltaY : e.deltaX; // trackpad swipe or Shift + wheel glides along the stream
+  if (sideways && (e.shiftKey || Math.abs(e.deltaX) > Math.abs(e.deltaY))) { goal.x += sideways * cam.dist * .0012; hintSeen(); return; }
+  cam.dist = Math.max(260, Math.min(2200, cam.dist * Math.exp(e.deltaY * .0011)));
+}, { passive: false });
+// the hint in the map corner fades out after the first drag or glide
+let hintGone = false;
+function hintSeen() { if (hintGone) return; hintGone = true; $("hint").classList.add("fade"); }
 const keys = new Set();
 const typing = (e) => /^(INPUT|SELECT|TEXTAREA)$/.test((e.target && e.target.tagName) || "");
 addEventListener("keydown", (e) => {
@@ -2204,7 +2212,7 @@ setTab("map");
 
 
 /* ---------- labels ---------- */
-const labelPool = [], NEAR_PX = 80, TAG_CAP = 60;
+const labelPool = [], NEAR_PX = 80, TAG_CAP = 60, TAG_NEAR = 620;
 function labelAt(i) {
   if (!labelPool[i]) { const d = el("div", { class: "lb" }); $("labels").append(d); labelPool[i] = d; }
   return labelPool[i];
@@ -2233,8 +2241,7 @@ function drawEraHead() {
       const x0 = sx(edges[i]), x1 = sx(edges[i + 1]);
       if (x0 === null || x1 === null) return;
       const mid = (x0 + x1) / 2, w = b.name.length * 9.5 + 16;
-      if (b.name && mid > 20 && mid < r.width - 20 && mid - w / 2 > lastMid + lastW / 2 + 6) { put("eh", mid, b.name); lastMid = mid; lastW = w; }
-      if (i > 0 && x0 > 2 && x0 < r.width - 2) put("ed", x0, "");
+      if (b.name && mid > 20 && mid < r.width - 20 && mid - w / 2 > lastMid + lastW / 2 + 6) { put("eh", mid, b.name); put("et", mid, ""); lastMid = mid; lastW = w; }
     });
   }
   for (; k < eraPool.length; k++) eraPool[k].style.display = "none";
@@ -2339,8 +2346,9 @@ function frame(now) {
   for (const o of objs) {
     if (!o.sprite.visible) continue;
     const sp = toScreen(o.sprite.position); if (!sp) continue;
-    const pri = o.n.id === selectedId ? 0 : o.n.id === hoverId ? 1 : nbrIds.has(o.n.id) ? 2 : 3;
-    cands.push({ o, sp, pri, d: camera.position.distanceTo(o.sprite.position) });
+    const pri = o.n.id === selectedId ? 0 : o.n.id === hoverId ? 1 : nbrIds.has(o.n.id) ? 2 : 3, d = camera.position.distanceTo(o.sprite.position);
+    if (pri === 3 && d > TAG_NEAR) continue; // names appear on the nodes near you as you fly in; far ones stay quiet
+    cands.push({ o, sp, pri, d });
   }
   cands.sort((p, q) => p.pri - q.pri || p.d - q.d);
   let shown = 0;
@@ -2349,7 +2357,7 @@ function frame(now) {
     const w = Math.min(190, c.o.n.name.length * 7.4 + 22), h = 26, rpx = c.o.R * pxPerUnit(c.o.sprite.position);
     let dy = rpx * 2.1 + 6; // below the node, else above it
     if (!fits(c.sp.x - w / 2, c.sp.y + dy, w, h)) { dy = -(rpx * 2.1 + 6 + h); if (!fits(c.sp.x - w / 2, c.sp.y + dy, w, h)) continue; }
-    const alpha = c.pri < 3 ? 1 : Math.max(.5, Math.min(1, 1.35 - c.d / 2000));
+    const alpha = c.pri < 3 ? 1 : Math.max(.35, Math.min(1, (TAG_NEAR - c.d) / (TAG_NEAR * .35)));
     showLabel(c.o.n.name, c.o.sprite.position, "tag" + (c.pri === 0 ? " sel" : c.pri === 1 ? " hov" : c.pri === 2 ? " nb" : ""), dy, "", alpha);
     shown++;
   }
