@@ -405,6 +405,7 @@ try {
     await expect(page.locator('#f-type')).toBeFocused();
     await expect(page.locator('#f-name')).toHaveValue('');
     await page.locator('#detail').getByRole('button', { name: 'Cancel', exact: true }).click();
+    await expect(page.locator('#newNode')).toBeFocused();
     await page.locator('#chatBtn').click();
     await expect(page.locator('#chatIn')).toHaveValue(draft);
     assert.deepEqual(await page.locator('#chat .ctray .tn').allTextContents(), pinsBefore,
