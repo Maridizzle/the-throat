@@ -216,7 +216,7 @@
 
   // Cancel returns to the control that opened the editor, without touching saves.
   let editorLauncher = null;
-  const editorEnded = () => queueMicrotask(() => {
+  const editorEnded = () => setTimeout(() => {
     const detail = document.getElementById("detail");
     const active = document.activeElement;
     if (!detail || detail.classList.contains("editing") || document.querySelector(".modal")) return;
@@ -224,7 +224,7 @@
     if (!focus(editorLauncher) && !focus(detail.querySelector(".acts button"))) {
       focus(document.getElementById("newNode"));
     }
-  });
+  }, 0);
   document.addEventListener("click", (event) => {
     const target = event.target instanceof Element ? event.target : null;
     if (!target) return;
