@@ -1,0 +1,53 @@
+name: Visual and accessibility review
+
+on:
+  push:
+    branches: [codex/atmospheric-design]
+    paths:
+      - 'public/**'
+      - 'tests/visual-review.mjs'
+      - '.github/workflows/visual-review.yml'
+  pull_request:
+    paths:
+      - 'public/**'
+      - 'tests/visual-review.mjs'
+      - '.github/workflows/visual-review.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: visual-review-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - name: Install application dependencies
+        run: npm ci
+      - name: Install isolated review tools
+        run: npm install --no-save --package-lock=false @playwright/test@1.56.1 @axe-core/playwright@4.10.2 three@0.128.0
+      - name: Install Chromium
+        run: npx playwright install --with-deps chromium
+      - name: Check JavaScript syntax
+        run: |
+          node --check public/js/app.js
+          node --check public/js/accessibility.js
+          node --check tests/visual-review.mjs
+      - name: Review isolated app
+        run: node tests/visual-review.mjs
+      - name: Save screenshots and accessibility results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: atmospheric-visual-review
+          path: artifacts/visual-review/
+          if-no-files-found: warn
+          retention-days: 14

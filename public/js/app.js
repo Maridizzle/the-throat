@@ -174,6 +174,7 @@ function rebuildGraph() {
   for (const n of nodes) { extX = Math.max(extX, Math.abs(n.x)); extYZ = Math.max(extYZ, Math.hypot(n.y, n.z)); }
   const homeDist = Math.min(3600, Math.max(560, extX * 1.55, extYZ * 2.6));
   graph = { nodes, byId, links, nbrs, lay, homeDist };
+  syncTimeNav();
 }
 
 /* ---------- three.js scene ---------- */
@@ -185,7 +186,13 @@ const cv = $("c");
 const renderer = new THREE.WebGLRenderer({ canvas: cv, antialias: true, alpha: true });
 renderer.setClearColor(0x000000, 0);
 const scene = new THREE.Scene();
-scene.fog = new THREE.FogExp2(0x0B0714, 0.00042);
+scene.fog = new THREE.FogExp2(0x0B0714, 0.00052);
+// Static violet lighting gives the existing type silhouettes physical depth.
+scene.add(new THREE.AmbientLight(0xB8A3D6, .62));
+const keyLight = new THREE.DirectionalLight(0xF1DFFF, 1.15);
+keyLight.position.set(-350, 600, 700); scene.add(keyLight);
+const rimLight = new THREE.DirectionalLight(0x8074D1, .55);
+rimLight.position.set(500, -120, -300); scene.add(rimLight);
 const camera = new THREE.PerspectiveCamera(50, 1, 5, 9000);
 let W = 0, H = 0;
 
@@ -202,6 +209,22 @@ function resize() {
   camera.aspect = W / H; camera.updateProjectionMatrix();
 }
 addEventListener("resize", resize);
+// Keep original full-window projection/picking coordinates, but place the map's
+// focal point in the available reading-layout cell rather than behind the chat.
+let mapViewSignature = "";
+function updateMapViewport() {
+  const space = document.getElementById("map-space");
+  if (!space || !W || !H) return;
+  const r = space.getBoundingClientRect();
+  if (r.width < 1 || r.height < 1) return;
+  const x = Math.round(W / 2 - r.left - r.width / 2);
+  const y = Math.round(H / 2 - r.top - r.height / 2);
+  const signature = [W, H, x, y].join(":");
+  if (signature !== mapViewSignature) {
+    mapViewSignature = signature;
+    camera.setViewOffset(W, H, x, y, W, H);
+  }
+}
 
 /* textures drawn on canvases */
 const tileCanvas = (() => {
@@ -263,6 +286,43 @@ const pulseTex = radialTexture([[0, 1], [.25, .55], [1, 0]]);
 const selRingTex = ringTexture();
 const nodeTex = {};
 for (const k of TYPE_ORDER) nodeTex[k] = nodeTexture(k);
+// One cached geometry per type/quality, never a change to node records or layout.
+const gemGeometries = new Map(), reliefTex = new THREE.CanvasTexture(tileCanvas);
+reliefTex.wrapS = reliefTex.wrapT = THREE.RepeatWrapping;
+function gemGeometry(shape, level) {
+  const key = shape + ":" + level;
+  if (gemGeometries.has(key)) return gemGeometries.get(key);
+  const path = new THREE.Shape();
+  if (shape === "circle" || shape === "ring") {
+    path.absarc(0, 0, .93, 0, TAU, false);
+    if (shape === "ring") {
+      const hole = new THREE.Path();
+      hole.absarc(0, 0, .55, 0, TAU, true); path.holes.push(hole);
+    }
+  } else {
+    const count = { diamond: 4, hexagon: 6, triangle: 3, square: 4, pentagon: 5, octagon: 8 }[shape] || 6;
+    const rotation = { hexagon: 0, square: Math.PI / 4, octagon: Math.PI / 8 }[shape] ?? Math.PI / 2;
+    const radius = { diamond: 1.13, square: 1.08, octagon: .97 }[shape] || 1;
+    for (let i = 0; i < count; i++) {
+      const a = rotation + i * TAU / count, x = Math.cos(a) * radius, y = Math.sin(a) * radius;
+      i ? path.lineTo(x, y) : path.moveTo(x, y);
+    }
+    path.closePath();
+  }
+  const geo = new THREE.ExtrudeGeometry(path, { depth: .32, steps: 1, curveSegments: level === 2 ? 18 : 10,
+    bevelEnabled: true, bevelThickness: .13, bevelSize: .075, bevelSegments: level === 2 ? 3 : 1 });
+  geo.translate(0, 0, -.16); geo.rotateX(.12); geo.rotateY(-.20);
+  gemGeometries.set(key, geo); return geo;
+}
+function nodeGem(type, radius) {
+  if (quality === 0) return null; // inexpensive textured sprites stay available on Low
+  const color = new THREE.Color(TYPES[type].hex);
+  const gem = new THREE.Mesh(gemGeometry(TYPES[type].shape, quality),
+    new THREE.MeshPhongMaterial({ color, emissive: color.clone().multiplyScalar(.11), specular: 0xE8DBFF,
+      shininess: 52, bumpMap: reliefTex, bumpScale: .012, flatShading: true }));
+  gem.scale.setScalar(radius); gem.renderOrder = 2;
+  return gem;
+}
 
 /* dust */
 let dust = null;
@@ -287,7 +347,7 @@ const pulses = [];
 let decorObjs = [], ringAngle = 0;
 const UP = new THREE.Vector3(0, 1, 0), tmpP = new THREE.Vector3(), tmpQ = new THREE.Vector3();
 function clearGroup() {
-  for (const o of objs) { o.sprite.material.dispose(); if (o.glow) o.glow.material.dispose(); }
+  for (const o of objs) { o.sprite.material.dispose(); if (o.gem) o.gem.material.dispose(); if (o.glow) o.glow.material.dispose(); }
   for (const l of linkObjs) { l.line.geometry.dispose(); l.line.material.dispose(); }
   for (const d of decorObjs) { d.geometry.dispose(); d.material.dispose(); }
   for (const p of pulses) p.material.dispose();
@@ -318,6 +378,7 @@ function placeRing() {
     o.n.x = r.x; o.n.z = Math.sin(a) * r.r;
     o.n.y = Math.cos(a) * r.r * .8 + (calm ? 0 : Math.sin(time * .4 + o.ph) * 6);
     o.sprite.position.set(o.n.x, o.n.y, o.n.z);
+    if (o.gem) o.gem.position.copy(o.sprite.position);
     if (o.glow) o.glow.position.copy(o.sprite.position);
   }
   for (const lo of linkObjs) if (lo.link.moving) updateLinkGeom(lo);
@@ -384,8 +445,11 @@ function buildScene() {
         depthWrite: false, blending: THREE.AdditiveBlending, opacity: .3 }));
       glow.position.copy(sprite.position); glow.renderOrder = 1; group.add(glow);
     }
+    const gem = nodeGem(n.type, R);
+    if (gem) { gem.position.copy(sprite.position); group.add(gem); sprite.material.opacity = 0; }
+    // The sprite remains the common pick/label anchor at every quality tier.
     group.add(sprite);
-    const o = { n, sprite, glow, R, ph: (hash(n.id) % 628) / 100, gk: 1, op: .3 };
+    const o = { n, sprite, gem, glow, R, ph: (hash(n.id) % 628) / 100, gk: 1, op: .3 };
     objs.push(o); byId.set(n.id, o);
   }
   objs.byId = byId;
@@ -412,7 +476,7 @@ const presRings = [0, 1, 2].map(() => {
   return s;
 });
 function applyVisibility() {
-  for (const o of objs) { const v = !hidden.has(o.n.type); o.sprite.visible = v; if (o.glow) o.glow.visible = v; }
+  for (const o of objs) { const v = !hidden.has(o.n.type); o.sprite.visible = v; if (o.gem) o.gem.visible = v; if (o.glow) o.glow.visible = v; }
   for (const l of linkObjs) l.line.visible = !hidden.has(l.link.a.type) && !hidden.has(l.link.b.type);
 }
 
@@ -559,6 +623,7 @@ function select(id) {
   showDetail();
   markLayerSelection();
   chatSync();
+  syncTimeNav();
   pingSoon();
 }
 function refreshLinkEmphasis() {
@@ -585,11 +650,20 @@ cv.addEventListener("pointerleave", () => { mx = my = -999; mouseOn = false; });
 cv.addEventListener("wheel", (e) => { e.preventDefault(); cam.dist = Math.max(260, Math.min(2200, cam.dist * Math.exp(e.deltaY * .0011))); }, { passive: false });
 const keys = new Set();
 const typing = (e) => /^(INPUT|SELECT|TEXTAREA)$/.test((e.target && e.target.tagName) || "");
-addEventListener("keydown", (e) => { if (!typing(e)) keys.add(e.key.toLowerCase()); });
+addEventListener("keydown", (e) => {
+  if (document.activeElement === cv && !document.querySelector(".modal") && !typing(e) && !e.ctrlKey && !e.metaKey && !e.altKey) {
+    if (["w", "a", "s", "d"].includes(e.key.toLowerCase())) { e.preventDefault(); keys.add(e.key.toLowerCase()); }
+    if (e.key === "Shift") keys.add("shift");
+  }
+});
+cv.addEventListener("blur", () => keys.clear());
 addEventListener("keyup", (e) => keys.delete(e.key.toLowerCase()));
 addEventListener("blur", () => keys.clear());
 
-function applyBodyClass() { document.body.className = (calm ? "calm " : "") + "q" + quality; }
+function applyBodyClass() {
+  document.body.classList.toggle("calm", calm);
+  for (let q = 0; q <= 2; q++) document.body.classList.toggle("q" + q, q === quality);
+}
 $("qsel").addEventListener("change", (e) => { quality = +e.target.value; applyBodyClass(); resize(); buildDust(); buildScene(); refreshLinkEmphasis(); });
 const calmBox = $("calm"), mq = matchMedia("(prefers-reduced-motion: reduce)");
 function setCalm(v) { calm = v; calmBox.checked = v; applyBodyClass(); }
@@ -2089,6 +2163,7 @@ function frame(now) {
   cam.yaw += sway - swayPrev; swayPrev = sway;
   const cp = Math.cos(cam.pit), dd = cam.dist * Math.min(1.8, Math.max(1, .85 / camera.aspect)); // pull back on portrait screens
   camera.position.set(target.x + Math.sin(cam.yaw) * cp * dd, target.y + Math.sin(cam.pit) * dd, target.z + Math.cos(cam.yaw) * cp * dd);
+  updateMapViewport();
   camera.lookAt(target);
   camera.updateMatrixWorld();
   if (dust && !calm) dust.rotation.y += dt * .004;
@@ -2112,6 +2187,7 @@ function frame(now) {
     o.gk += (k - o.gk) * Math.min(1, dt * 8); o.op += (tgtOp - o.op) * Math.min(1, dt * 8);
     const br = calm ? 1 : 1 + .04 * Math.sin(time * 1.3 + o.ph);
     o.sprite.scale.setScalar(o.R * 3.05 * br);
+    if (o.gem) { o.gem.scale.setScalar(o.R * br); o.gem.quaternion.copy(camera.quaternion); }
     if (o.glow) { o.glow.scale.setScalar(o.R * 2 * o.gk * br); o.glow.material.opacity = o.op; }
   }
   // links: emphasis and pulses
@@ -2212,7 +2288,7 @@ function drawStrip() {
   stGeom = g; stTicks = [];
   const oth = othersFocus();
   c.setTransform(dpr, 0, 0, dpr, 0, 0); c.clearRect(0, 0, cssW, cssH);
-  c.textAlign = "left"; c.font = '10px "Cinzel", Georgia, serif';
+  c.textAlign = "left"; c.font = '13px "Cormorant Garamond", Georgia, serif';
   if (lay.timed.length) {
     lay.bands.forEach((b, i) => {
       const x0 = stX(b.u0 - .45, g), x1 = stX(b.u1 + .45, g);
@@ -2276,6 +2352,36 @@ st.addEventListener("pointermove", (e) => {
 });
 st.addEventListener("pointerup", () => { stDown = false; });
 st.addEventListener("pointerleave", () => { stTip.style.display = "none"; });
+
+// An ordered DOM alternative to the pointer-only scrub strip. Uses the same select path.
+const timeNav = el("div", { class: "time-nav" });
+const timeLabel = el("label", { for: "time-node" }, "Story time");
+const timeChoice = el("select", { id: "time-node", "aria-label": "Go to a node in story order" });
+const timePrev = el("button", { type: "button", "aria-label": "Previous node in story time" }, "Previous");
+const timeNext = el("button", { type: "button", "aria-label": "Next node in story time" }, "Next");
+timeNav.append(timeLabel, timePrev, timeChoice, timeNext); $("strip").append(timeNav);
+let timeNavSignature = "";
+function syncTimeNav() {
+  const nodes = graph.lay.timed, signature = JSON.stringify(nodes.map((n) => [n.id, n.name, whenText(n)]));
+  if (signature !== timeNavSignature) {
+    timeNavSignature = signature;
+    timeChoice.replaceChildren(el("option", { value: "" }, "Choose a node…"),
+      ...nodes.map((n) => el("option", { value: n.id }, n.name + " — " + whenText(n))));
+  }
+  timeChoice.value = nodes.some((n) => n.id === selectedId) ? selectedId : "";
+  const at = nodes.findIndex((n) => n.id === selectedId);
+  timePrev.disabled = !nodes.length || at === 0;
+  timeNext.disabled = !nodes.length || at === nodes.length - 1;
+}
+timeChoice.addEventListener("change", () => { if (timeChoice.value) select(timeChoice.value); });
+timePrev.addEventListener("click", () => {
+  const nodes = graph.lay.timed, at = nodes.findIndex((n) => n.id === selectedId);
+  if (nodes.length) select(nodes[at < 0 ? nodes.length - 1 : Math.max(0, at - 1)].id);
+});
+timeNext.addEventListener("click", () => {
+  const nodes = graph.lay.timed, at = nodes.findIndex((n) => n.id === selectedId);
+  if (nodes.length) select(nodes[at < 0 ? 0 : Math.min(nodes.length - 1, at + 1)].id);
+});
 
 /* minimap: top-down view */
 const mm = $("mm"), mctx = mm.getContext("2d");
