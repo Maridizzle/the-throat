@@ -144,6 +144,29 @@ async function routeReviewRequest(route) {
   return route.abort();
 }
 
+async function eraPositions() {
+  // app.js reuses a pool of label elements; hidden elements can retain a stale
+  // era class and transform. Measure only the currently rendered era labels.
+  return page.locator('#labels .lb.era:visible').evaluateAll((els) =>
+    els.map((e) => ({ name: e.textContent, transform: e.style.transform }))
+      .sort((a, b) => a.name.localeCompare(b.name)));
+}
+
+async function settledEraPositions() {
+  let previous = null, stableSamples = 0;
+  await expect.poll(async () => {
+    const positions = await eraPositions();
+    const serialized = JSON.stringify(positions);
+    stableSamples = positions.length === 2 && serialized === previous ? stableSamples + 1 : 0;
+    previous = serialized;
+    return stableSamples;
+  }, {
+    message: 'The calm camera must settle before testing keyboard scope',
+    timeout: 20000, intervals: [100],
+  }).toBeGreaterThanOrEqual(8);
+  return eraPositions();
+}
+
 async function selectFixture() {
   await page.getByRole('button', { name: 'Show the list of Character nodes', exact: true }).click();
   await page.locator('#lnodes-character').getByRole('button', { name: 'Review character', exact: true }).click();
@@ -363,17 +386,65 @@ try {
     }
     await screenshot('desktop-1100-chat');
     await page.getByRole('button', { name: 'Close the chat', exact: true }).click();
+    // This chat session was launched by the selected node's Add to chat.
+    await expect(page.locator('#detail').getByRole('button', { name: 'Add to chat', exact: true })).toBeFocused();
+  });
+
+
+  await check('Chat-to-editor transition preserves focus, draft and pinned nodes', async () => {
+    await page.setViewportSize({ width: 1440, height: 1000 });
+    await page.locator('#chatBtn').click();
+    await expect(page.locator('#chat')).toBeVisible();
+    const draft = 'Neutral unsent draft — keep these exact words.';
+    await page.locator('#chatIn').fill(draft);
+    const pinsBefore = await page.locator('#chat .ctray .tn').allTextContents();
+    assert.ok(pinsBefore.includes('Review character'), 'The earlier pinned node must remain');
+    await page.locator('#newNode').click();
+    await expect(page.locator('#chat')).toBeHidden();
+    await expect(page.locator('#detail')).toHaveClass(/editing/);
+    await expect(page.locator('#f-type')).toBeFocused();
+    await expect(page.locator('#f-name')).toHaveValue('');
+    await page.locator('#detail').getByRole('button', { name: 'Cancel', exact: true }).click();
+    await expect(page.locator('#newNode')).toBeFocused();
+    await page.locator('#chatBtn').click();
+    await expect(page.locator('#chatIn')).toHaveValue(draft);
+    assert.deepEqual(await page.locator('#chat .ctray .tn').allTextContents(), pinsBefore,
+      'Opening and canceling the editor changed pinned nodes');
+    await page.locator('#chatIn').fill('');
+    await page.getByRole('button', { name: 'Close the chat', exact: true }).click();
+    await expect(page.locator('#chatBtn')).toBeFocused();
+  });
+
+  await check('1100 by 600 layout keeps all controls reachable by root scrolling', async () => {
+    await page.setViewportSize({ width: 1100, height: 600 });
+    await page.locator('#chatBtn').click();
+    await expect(page.locator('#chat')).toBeVisible();
+    await panelsDoNotOverlap('#controls', '#chat');
+    await panelsDoNotOverlap('#controls', '#strip');
+    await assertReachableControls('#controls');
+    await assertReachableControls('#chat');
+    await assertReachableControls('.time-nav');
+    assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1),
+      'Short desktop has page-level horizontal overflow');
+    const documentHeight = await page.evaluate(() => document.documentElement.scrollHeight);
+    if (documentHeight > 601) {
+      await page.evaluate(() => window.scrollTo(0, document.documentElement.scrollHeight));
+      assert.ok(await page.evaluate(() => window.scrollY > 0),
+        'Content extends below the viewport but the document cannot scroll');
+    }
+    await screenshot('desktop-short-chat');
+    await page.getByRole('button', { name: 'Close the chat', exact: true }).click();
     await expect(page.locator('#chatBtn')).toBeFocused();
   });
 
   await check('Map shortcuts act only while the map has focus', async () => {
     await page.setViewportSize({ width: 1440, height: 1000 });
     await page.locator('#calm').check();
+    // The keyboard behavior is shared by every quality tier. Low keeps the
+    // software-rendered CI browser responsive while the eased camera settles.
+    await page.locator('#qsel').selectOption('0');
     await page.locator('#reset').click();
-    await page.waitForTimeout(1500); // Existing eased camera must settle.
-    const eraPositions = () => page.locator('#labels .era').evaluateAll((els) => els.map((e) => e.style.transform));
-    const beforeKeys = await eraPositions();
-    assert.ok(beforeKeys.length >= 1, 'Seeded era positions must be visible');
+    const beforeKeys = await settledEraPositions();
     await page.locator('#reset').focus();
     await page.keyboard.down('a'); await page.waitForTimeout(400); await page.keyboard.up('a');
     assert.deepEqual(await eraPositions(), beforeKeys, 'Toolbar letter keys moved the map');
@@ -381,6 +452,7 @@ try {
     await expect(page.locator('#c')).toBeFocused();
     await page.keyboard.down('a'); await page.waitForTimeout(400); await page.keyboard.up('a');
     assert.notDeepEqual(await eraPositions(), beforeKeys, 'Focused map keyboard navigation did not move');
+    await page.locator('#qsel').selectOption('2');
   });
 
   await check('Reduced-motion preference updates while the app is open', async () => {
@@ -468,6 +540,10 @@ try {
       await page.evaluate(() => document.fonts.ready);
       const preview = await page.screenshot({ type: 'jpeg', quality: 65, fullPage: false });
       console.log('THROAT_PREVIEW_JPEG:' + preview.toString('base64'));
+      await page.setViewportSize({ width: 320, height: 900 });
+      await page.evaluate(() => window.scrollTo(0, 0));
+      const mobilePreview = await page.screenshot({ type: 'jpeg', quality: 65, fullPage: true });
+      console.log('THROAT_MOBILE_PREVIEW_JPEG:' + mobilePreview.toString('base64'));
     } catch (error) { console.log('Compact preview unavailable: ' + error.message); }
   }
   await writeFile(join(artifacts, 'review-report.json'), JSON.stringify(report, null, 2));

@@ -174,7 +174,11 @@
     chatWasOpen = open;
     if (open && !wasOpen) chatLauncher = lastOutsideChat;
     else if (!open && wasOpen && !document.querySelector(".modal")) {
-      if (!focus(chatLauncher)) focus(button);
+      const active = document.activeElement;
+      // Preserve focus deliberately placed by the app, such as a new editor.
+      const outsideControl = active !== document.body && active !== document.documentElement &&
+        available(active) && !chat.contains(active);
+      if (!outsideControl && !focus(chatLauncher)) focus(button);
     }
   }
   document.addEventListener("focusin", (event) => {
@@ -209,6 +213,29 @@
   });
   syncChat();
   syncModal();
+
+  // Cancel returns to the control that opened the editor, without touching saves.
+  let editorLauncher = null;
+  const editorEnded = () => setTimeout(() => {
+    const detail = document.getElementById("detail");
+    const active = document.activeElement;
+    if (!detail || detail.classList.contains("editing") || document.querySelector(".modal")) return;
+    if (active !== document.body && active !== document.documentElement && available(active)) return;
+    if (!focus(editorLauncher) && !focus(detail.querySelector(".acts button"))) {
+      focus(document.getElementById("newNode"));
+    }
+  }, 0);
+  document.addEventListener("click", (event) => {
+    const target = event.target instanceof Element ? event.target : null;
+    if (!target) return;
+    const launcher = target.closest("#newNode, #detail:not(.editing) .acts button:first-child");
+    if (launcher) editorLauncher = launcher;
+    if (target.closest("#detail.editing .acts button.quiet")) editorEnded();
+  }, true);
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && !document.querySelector(".modal") &&
+        document.getElementById("detail")?.classList.contains("editing")) editorEnded();
+  }, true);
 
   // Startup remains app.js's decision; react only when the OS changes to reduce.
   const motion = matchMedia("(prefers-reduced-motion: reduce)");
