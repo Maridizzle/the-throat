@@ -39,6 +39,10 @@ function createAi(env, deps) {
   const DEFAULT_OUTPUT_TOKENS = 2000;
   const TIMEOUT_MS = optNum(env.AI_TIMEOUT_MS) ?? 120000;
   const RATE_WINDOW_MS = 10 * 60 * 1000;
+  const RETRY_WAIT_MAX = optNum(env.AI_RETRY_WAIT_MAX_SECONDS) ?? 15; // longest wait, in seconds, before one retry after a provider rate limit
+  const sleep = (deps && deps.sleep) || ((ms) => new Promise((r) => setTimeout(r, ms)));
+  // Strict JSON mode made gpt-oss models fail on Groq, so it is off unless GROQ_JSON_MODE=on. The prompts ask for JSON and replies are checked anyway.
+  const GROQ_JSON_MODE = String(env.GROQ_JSON_MODE || "").toLowerCase() === "on";
 
   function priceOf(model, inVar, outVar) {
     const i = optNum(inVar), o = optNum(outVar);
@@ -46,7 +50,7 @@ function createAi(env, deps) {
     return DEFAULT_PRICES[model] || null;
   }
   function build(name, cfg) {
-    const out = { name, key: cfg.key || "", base: cfg.base, cap: cfg.cap, rate: cfg.rate, models: {}, reason: "" };
+    const out = { name, key: cfg.key || "", base: cfg.base, cap: cfg.cap, rate: cfg.rate, tpm: cfg.tpm || null, models: {}, reason: "" };
     out.models.fast = { id: cfg.model, price: priceOf(cfg.model, cfg.priceIn, cfg.priceOut) };
     out.models.accurate = cfg.accurateModel && cfg.accurateModel !== cfg.model
       ? { id: cfg.accurateModel, price: priceOf(cfg.accurateModel, cfg.accPriceIn, cfg.accPriceOut) }
@@ -61,13 +65,13 @@ function createAi(env, deps) {
     groq: build("groq", {
       key: env.GROQ_API_KEY, base: (env.GROQ_BASE_URL || "https://api.groq.com/openai/v1").replace(/\/+$/, ""),
       model: env.GROQ_MODEL || "openai/gpt-oss-20b", priceIn: env.GROQ_PRICE_IN, priceOut: env.GROQ_PRICE_OUT,
-      cap: optNum(env.AI_BUDGET_GROQ) ?? 5, rate: optNum(env.AI_RATE_GROQ) ?? 40,
+      cap: optNum(env.AI_BUDGET_GROQ) ?? 5, rate: optNum(env.AI_RATE_GROQ) ?? 40, tpm: optNum(env.GROQ_TPM_LIMIT),
     }),
     openai: build("openai", {
       key: env.OPENAI_API_KEY, base: (env.OPENAI_BASE_URL || "https://api.openai.com/v1").replace(/\/+$/, ""),
       model: env.OPENAI_MODEL || "gpt-6-luna", priceIn: env.OPENAI_PRICE_IN, priceOut: env.OPENAI_PRICE_OUT,
       accurateModel: env.OPENAI_MODEL_ACCURATE, accPriceIn: env.OPENAI_ACCURATE_PRICE_IN, accPriceOut: env.OPENAI_ACCURATE_PRICE_OUT,
-      cap: optNum(env.AI_BUDGET_OPENAI) ?? 10, rate: optNum(env.AI_RATE_OPENAI) ?? 10,
+      cap: optNum(env.AI_BUDGET_OPENAI) ?? 10, rate: optNum(env.AI_RATE_OPENAI) ?? 10, tpm: optNum(env.OPENAI_TPM_LIMIT),
     }),
   };
 
@@ -133,7 +137,7 @@ function createAi(env, deps) {
       if (req.provider === "groq") {
         url = p.base + "/chat/completions";
         body = { model: req.model.id, messages: req.messages, max_completion_tokens: req.maxOut, temperature: 0.3 };
-        if (req.json) body.response_format = { type: "json_object" };
+        if (req.json && GROQ_JSON_MODE) body.response_format = { type: "json_object" };
       } else {
         url = p.base + "/responses";
         body = { model: req.model.id, input: req.messages, max_output_tokens: req.maxOut, store: false };
@@ -144,7 +148,12 @@ function createAi(env, deps) {
       let j = null; try { j = JSON.parse(raw); } catch (e) { /* not JSON */ }
       if (!r.ok) {
         const pe = j && j.error && typeof j.error === "object" ? j.error : null;
-        return { fail: r.status, detail: raw.slice(0, 300).split(p.key).join("[key]"), code: pe && typeof pe.code === "string" ? pe.code : "",
+        let retryAfter = null; // seconds, from the retry-after header or the provider's "try again in 5.9s" wording
+        const hdr = Number(r.headers && r.headers.get && r.headers.get("retry-after"));
+        if (Number.isFinite(hdr) && hdr >= 0 && r.headers.get("retry-after") !== "") retryAfter = hdr;
+        const m = pe && typeof pe.message === "string" ? pe.message.match(/try again in ([\d.]+)\s*(ms|s|m)\b/i) : null;
+        if (m) retryAfter = Number(m[1]) * (m[2].toLowerCase() === "ms" ? 0.001 : m[2].toLowerCase() === "m" ? 60 : 1);
+        return { fail: r.status, retryAfter, detail: raw.slice(0, 300).split(p.key).join("[key]"), code: pe && typeof pe.code === "string" ? pe.code : "",
           pmsg: pe && typeof pe.message === "string" ? pe.message.split(p.key).join("[key]").replace(/\s+/g, " ").slice(0, 200) : "" };
       }
       if (!j) return { fail: 502, detail: "reply was not JSON" };
@@ -189,7 +198,7 @@ function createAi(env, deps) {
     configured: p.configured, reason: p.reason || null,
     model: p.models.fast.id, accurate_model: p.models.accurate.id,
     prices_per_million_usd: { fast: p.models.fast.price, accurate: p.models.accurate.price },
-    monthly_cap_usd: p.cap, spent_this_month_usd: round6(spent[p.name]), rate_per_10_minutes: p.rate,
+    monthly_cap_usd: p.cap, spent_this_month_usd: round6(spent[p.name]), rate_per_10_minutes: p.rate, tokens_per_minute: p.tpm,
   });
   router.get("/status", wrap(async (req, res) => {
     await loadMonth();
@@ -205,6 +214,10 @@ function createAi(env, deps) {
     if (r.error) { res.status(r.error === "too_large" ? 413 : 400).json(r); return null; }
     const p = providers[r.provider];
     if (!p.configured) { res.status(503).json({ error: "not_configured", provider: r.provider, message: "The " + r.provider + " key or prices are not set on the server: " + p.reason + "." }); return null; }
+    if (p.tpm && r.inTok + r.maxOut > p.tpm) {
+      res.status(413).json({ error: "too_large", message: "This request is about " + (r.inTok + r.maxOut) + " tokens (including the reply allowance), more than " + r.provider + "'s limit of " + p.tpm + " tokens per minute. Send less text.", limit_tokens_per_minute: p.tpm });
+      return null;
+    }
     await loadMonth();
     return r;
   }
@@ -239,6 +252,13 @@ function createAi(env, deps) {
         fellBack = true;
         out = await upstream({ ...r, json: false });
       }
+      // A provider rate limit that clears in a few seconds is waited out once.
+      if (out.fail === 429 && out.retryAfter !== null && out.retryAfter <= RETRY_WAIT_MAX) {
+        console.error("ai " + r.provider + ": rate limited, waiting " + out.retryAfter.toFixed(1) + "s then retrying once");
+        await record({ ...ev, purpose: (r.purpose + " (rate limited)").slice(0, 80) });
+        await sleep(Math.ceil((out.retryAfter + 0.5) * 1000));
+        out = await upstream(r);
+      }
     } finally { pending[r.provider] -= r.estimate; }
     if (out.fail) {
       await record(ev);
@@ -246,7 +266,9 @@ function createAi(env, deps) {
       const status = out.fail === 429 ? 429 : out.fail === 504 ? 504 : 502;
       const msg = out.fail === 401 || out.fail === 403 ? "The provider rejected the server's key." : out.fail === 429 ? "The provider is rate limiting. Try again shortly." : out.fail === 504 ? "The provider took too long." : "The provider returned an error (" + out.fail + ").";
       const why = out.pmsg && out.fail !== 401 && out.fail !== 403 ? " The provider said: " + out.pmsg : "";
-      return res.status(status).json({ error: out.fail === 401 || out.fail === 403 ? "provider_auth" : "provider_error", message: msg + why });
+      const wait = out.fail === 429 && out.retryAfter !== null ? " Try again in about " + Math.max(1, Math.ceil(out.retryAfter)) + " seconds." : "";
+      return res.status(status).json({ error: out.fail === 401 || out.fail === 403 ? "provider_auth" : "provider_error", message: msg + wait + why,
+        ...(out.fail === 429 && out.retryAfter !== null ? { retry_after_seconds: Math.ceil(out.retryAfter) } : {}) });
     }
     const known = Number.isFinite(out.input) && Number.isFinite(out.output);
     ev.input_tokens = known ? out.input : r.inTok; ev.output_tokens = known ? out.output : r.maxOut;

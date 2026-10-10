@@ -1440,11 +1440,13 @@ function scanExplicit(text) {
 }
 const maskText = (text, sents) => sents.reduce((t, s) => t.split(s).join("[passage withheld]"), String(text));
 
-function nodeBlock(n, mask) {
+function nodeBlock(n, mask, maxChars) {
   const links = (Array.isArray(n.raw.links) ? n.raw.links : []).map((l) => { const t = l && graph.byId.get(l.to); return t ? t.name + (l.label ? " (" + l.label + ")" : "") : null; }).filter(Boolean);
   const body = mask ? maskText(n.name + "\n" + (n.summary || ""), scanExplicit(n.name + ". " + n.summary)) : n.name + "\n" + (n.summary || "");
   const [name, ...rest] = body.split("\n");
-  return "[NODE id=" + n.id + "] " + TYPES[n.type].label + ": " + name + "\n" + (rest.join("\n").trim() || "(no summary)") +
+  let text = rest.join("\n").trim();
+  if (maxChars && text.length > maxChars) text = text.slice(0, maxChars) + "\n[Only the first " + maxChars + " of " + rest.join("\n").trim().length + " characters fit the request limit. The rest was left out.]";
+  return "[NODE id=" + n.id + "] " + TYPES[n.type].label + ": " + name + "\n" + (text || "(no summary)") +
     (n.u != null ? "\nStory time: " + whenText(n) : "") + (links.length ? "\nLinked to: " + links.join("; ") : "");
 }
 const trayNodes = () => chat.tray.map((id) => graph.byId.get(id)).filter(Boolean);
@@ -1563,6 +1565,7 @@ function aiError(r, what) {
   if (r.status === 401) return "Your sign-in ended. Sign in again in a new tab, then try again.";
   if (r.status === 402) return "That would pass this month's " + what + " spending cap (" + usd(j.spent_this_month_usd || 0) + " spent of " + usd(j.monthly_cap_usd || 0) + "). Nothing was sent.";
   if (r.status === 413) return (j.message || "That is too much text for one request.") + " Remove some nodes from the list above or shorten your message.";
+  if (r.status === 429 && j.error === "provider_error") return (j.message || "The AI service is rate limiting.") + " Nothing was changed.";
   if (r.status === 429) return j.retry_after_seconds ? "You have sent a lot of messages. Try again in about " + Math.ceil(j.retry_after_seconds / 60) + " minute(s)." : "The AI service is rate limiting. Try again shortly.";
   if (r.status === 503) return j.message || "That AI is not set up on the server yet.";
   return j.message || "The AI service returned an error (" + r.status + "). Nothing was changed.";
@@ -1623,8 +1626,8 @@ async function screenForSend(text, nodes0) {
   return { nodes, mask, msgText };
 }
 const estUsd = (price, chars, outTok) => (Math.ceil(chars / 3) * price[0] + outTok * price[1]) / 1e6;
-function indexLines(nodes, mask) {
-  const per = Math.max(0, Math.min(160, Math.floor(90000 / Math.max(1, nodes.length)) - 160));
+function indexLines(nodes, mask, perMax) {
+  const per = Math.max(0, Math.min(perMax == null ? 160 : perMax, Math.floor(90000 / Math.max(1, nodes.length)) - 160));
   return nodes.map((n) => {
     const ms = mask ? maskText(n.name + "\n" + (n.summary || ""), scanExplicit(n.name + ". " + n.summary)) : n.name + "\n" + (n.summary || "");
     const [name, ...rest] = ms.split("\n");
@@ -1655,13 +1658,30 @@ async function chatSend() {
   if (!scr) return;
   const { nodes, mask, msgText } = scr;
   const limit = chat.status ? chat.status.max_input_chars : 400000;
-  const index = indexLines(nodes, mask);
+  // Some tiers cap tokens per minute (Groq's free one is 8,000). Then one call may carry about half of that, so the index and the full text shrink to fit.
+  const stp = chat.status && chat.status[chat.mode];
+  const tpm = stp && stp.tokens_per_minute ? stp.tokens_per_minute : null;
+  const reqChars = tpm ? Math.floor(tpm * 3 * 0.5) : null;
+  const sysChars = ANSWER_SYSTEM.length + 500;
   const byIdN = new Map(nodes.map((n) => [n.id, n]));
   const pinned = new Set(chat.tray.filter((id) => byIdN.has(id)));
   if (selectedId && byIdN.has(selectedId)) pinned.add(selectedId);
+  let index, listed = nodes;
+  if (!reqChars) index = indexLines(nodes, mask);
+  else {
+    const idxMax = Math.floor((reqChars - sysChars) * 0.5);
+    for (const per of [60, 25, 0]) { index = indexLines(nodes, mask, per); if (index.length <= idxMax) break; }
+    if (index.length > idxMax) { // still too long: list the pinned and selected nodes first, then as many others as fit
+      const order = [...nodes.filter((n) => pinned.has(n.id)), ...nodes.filter((n) => !pinned.has(n.id))];
+      listed = []; for (const n of order) { const t = indexLines([...listed, n], mask, 0); if (t.length > idxMax) break; listed.push(n); }
+      index = indexLines(listed, mask, 0);
+      chat.msgs.push({ role: "note", content: "Groq's per-minute limit means I can only list " + listed.length + " of " + nodes.length + " nodes this time. Pin or select the ones that matter, or use OpenAI for the whole map." });
+    }
+  }
   const allFull = nodes.reduce((a, n) => a + nodeChars(n), 0);
-  const needPick = allFull > FULL_MAX_CHARS;
-  const hist = chat.msgs.filter((m) => m.role === "user" || m.role === "assistant").slice(-10).map((m) => ({ role: m.role, content: m.sent || m.content }));
+  const hist = chat.msgs.filter((m) => m.role === "user" || m.role === "assistant").slice(-(tpm ? 4 : 10)).map((m) => ({ role: m.role, content: tpm ? (m.sent || m.content).slice(0, 600) : (m.sent || m.content) }));
+  const fullBudget = reqChars ? Math.max(0, reqChars - sysChars - index.length - hist.reduce((a, m) => a + m.content.length, 0) - msgText.length) : limit * 0.6;
+  const needPick = allFull > (reqChars ? Math.min(FULL_MAX_CHARS, fullBudget) : FULL_MAX_CHARS);
   const histChars = hist.reduce((a, m) => a + m.content.length, 0);
   let pre = null;
   if (chat.mode === "openai") {
@@ -1682,18 +1702,19 @@ async function chatSend() {
     else chat.msgs.push({ role: "note", content: "I could not choose nodes automatically, so I only used the index and the nodes you pinned or selected." });
   }
   // keep the full text within the request limit, pinned and selected nodes first
-  let used = 0; const full = [];
+  let used = 0; const full = [], cutAt = new Map();
   for (const id of [...pinned, ...[...ids].filter((x) => !pinned.has(x))]) {
     const n = byIdN.get(id); if (!n) continue;
-    const c = nodeChars(n);
-    if (used + c > limit * 0.6) { chat.msgs.push({ role: "note", content: "\u201c" + n.name + "\u201d was left out because the request would be too large." }); continue; }
-    used += c; full.push(n);
+    const c = nodeChars(n), room = fullBudget - used;
+    if (c <= room) { used += c; full.push(n); continue; }
+    if (reqChars && room >= 900) { cutAt.set(n.id, room - 160); used = fullBudget; full.push(n); chat.msgs.push({ role: "note", content: "\u201c" + n.name + "\u201d is longer than Groq's per-minute limit allows, so only its first part was read." }); continue; }
+    chat.msgs.push({ role: "note", content: "\u201c" + n.name + "\u201d was left out because the request would be too large." });
   }
   const eras = eraList();
   const system = ANSWER_SYSTEM + "\n\n" + (eras.length ? "Eras (id: name):\n" + eras.map((e) => e.id + ": " + e.name).join("\n") : "No eras exist yet, so leave time null.") +
     "\n\nINDEX (every node):\n" + (index || "(the map is empty)") +
-    "\n\nFULL TEXT of these nodes (" + (full.length ? full.map((n) => n.id).join(", ") : "none") + "):\n\n" + (full.map((n) => nodeBlock(n, mask)).join("\n\n") || "(none)");
-  const ctx = { ids: new Set(full.map((n) => n.id)), linkIds: new Set(nodes.map((n) => n.id)), eras: new Set(eras.map((e) => String(e.id))),
+    "\n\nFULL TEXT of these nodes (" + (full.length ? full.map((n) => n.id).join(", ") : "none") + "):\n\n" + (full.map((n) => nodeBlock(n, mask, cutAt.get(n.id))).join("\n\n") || "(none)");
+  const ctx = { maxOut: tpm ? Math.max(800, Math.min(CHAT_ANSWER_MAX_OUT, Math.floor(tpm * 0.2))) : CHAT_ANSWER_MAX_OUT, ids: new Set(full.map((n) => n.id)), linkIds: new Set(nodes.map((n) => n.id)), eras: new Set(eras.map((e) => String(e.id))),
     sourceNorm: normQ(msgText + "\n" + index + "\n" + full.map((n) => n.name + "\n" + n.summary).join("\n")),
     messages: [{ role: "system", content: system }, ...hist, { role: "user", content: msgText }] };
   const ok = await chatAnswer(ctx, chat.mode, pre);
@@ -1702,7 +1723,7 @@ async function chatSend() {
 }
 // The answer call. Replies are JSON: { reply, proposals }. If the model did not keep to that, its plain text is shown as the reply.
 async function chatAnswer(ctx, mode, pre) {
-  const reply = await chatRun(mode, ctx.messages, { raw: true, json: true, tier: "accurate", maxOut: CHAT_ANSWER_MAX_OUT, purpose: "chat", preConfirmed: pre });
+  const reply = await chatRun(mode, ctx.messages, { raw: true, json: true, tier: "accurate", maxOut: ctx.maxOut || CHAT_ANSWER_MAX_OUT, purpose: "chat", preConfirmed: pre });
   if (!reply) { renderLog(); renderChat(); return false; }
   const j = reply.json;
   let text, set = null;
