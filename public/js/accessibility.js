@@ -174,7 +174,11 @@
     chatWasOpen = open;
     if (open && !wasOpen) chatLauncher = lastOutsideChat;
     else if (!open && wasOpen && !document.querySelector(".modal")) {
-      if (!focus(chatLauncher)) focus(button);
+      const active = document.activeElement;
+      // Preserve focus deliberately placed by the app, such as a new editor.
+      const outsideControl = active !== document.body && active !== document.documentElement &&
+        available(active) && !chat.contains(active);
+      if (!outsideControl && !focus(chatLauncher)) focus(button);
     }
   }
   document.addEventListener("focusin", (event) => {

@@ -892,8 +892,8 @@ body.chat-open #hint, body:has(#chat:not([hidden])) #hint {
 #chat .tchip .tn { max-width: none; min-width: 0; }
 #chat .tchip button { border-width: 0 0 0 1px; border-radius: 0 11px 11px 0; font-size: 21px; }
 #chat .clog {
-  flex: 1 0 12rem;
-  min-height: 12rem;
+  flex: 1 1 8rem;
+  min-height: 4rem;
   max-height: 52vh;
   max-height: 52dvh;
   gap: 12px;
@@ -901,6 +901,7 @@ body.chat-open #hint, body:has(#chat:not([hidden])) #hint {
   overflow: auto;
   overscroll-behavior: contain;
 }
+#chat .clog:empty { flex-basis: 1rem; min-height: 1rem; }
 #chat .cmsg {
   position: relative;
   flex-shrink: 0;
@@ -1057,6 +1058,7 @@ body.loginpage {
 .login button { font-size: 16px; }
 .login #lerr { font-size: 15px; color: var(--warning); }
 @media (min-width: 861px) and (max-height: 650px) {
+  html { height: auto; min-height: 100%; overflow-y: auto; }
   body:not(.loginpage) {
     height: auto;
     min-height: 100dvh;

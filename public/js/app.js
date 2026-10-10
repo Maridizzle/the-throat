@@ -188,10 +188,10 @@ renderer.setClearColor(0x000000, 0);
 const scene = new THREE.Scene();
 scene.fog = new THREE.FogExp2(0x0B0714, 0.00052);
 // Static violet lighting gives the existing type silhouettes physical depth.
-scene.add(new THREE.AmbientLight(0xB8A3D6, .62));
-const keyLight = new THREE.DirectionalLight(0xF1DFFF, 1.15);
+scene.add(new THREE.AmbientLight(0xB8A3D6, .38));
+const keyLight = new THREE.DirectionalLight(0xF1DFFF, .78);
 keyLight.position.set(-350, 600, 700); scene.add(keyLight);
-const rimLight = new THREE.DirectionalLight(0x8074D1, .55);
+const rimLight = new THREE.DirectionalLight(0x8074D1, .32);
 rimLight.position.set(500, -120, -300); scene.add(rimLight);
 const camera = new THREE.PerspectiveCamera(50, 1, 5, 9000);
 let W = 0, H = 0;
@@ -318,8 +318,8 @@ function nodeGem(type, radius) {
   if (quality === 0) return null; // inexpensive textured sprites stay available on Low
   const color = new THREE.Color(TYPES[type].hex);
   const gem = new THREE.Mesh(gemGeometry(TYPES[type].shape, quality),
-    new THREE.MeshPhongMaterial({ color, emissive: color.clone().multiplyScalar(.11), specular: 0xE8DBFF,
-      shininess: 52, bumpMap: reliefTex, bumpScale: .012, flatShading: true }));
+    new THREE.MeshPhongMaterial({ color, emissive: color.clone().multiplyScalar(.07), specular: 0x7D6893,
+      shininess: 28, bumpMap: reliefTex, bumpScale: .025, flatShading: true }));
   gem.scale.setScalar(radius); gem.renderOrder = 2;
   return gem;
 }
