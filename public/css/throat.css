@@ -1209,3 +1209,183 @@ body.calm .grain, body.q0 .grain, body.q1 .grain { display: none; }
 
 /* Stable type-color contrast on chip surfaces. */
 #detail .chip, .improw .chip { background: var(--surface-deep); }
+
+/* Concept layout (Maridizzle's visual concept): a header bar, a framed map window with era columns and name tags,
+ * the overview inside the map's corner, and the chat as the right rail. Display only; no data or API changes. */
+body:not(.loginpage) {
+  grid-template-rows: auto minmax(0, 1fr) auto auto;
+  grid-template-areas:
+    "header header header"
+    "legend map detail"
+    "strip strip detail"
+    "controls controls controls";
+}
+#topbar { grid-area: header; display: flex; align-items: center; gap: 14px 22px; flex-wrap: wrap; min-height: 54px; padding: 8px 20px; z-index: 5; }
+#topbar #title { position: static; padding: 0; margin: 0; top: auto; left: auto; }
+#topbar #title h1 { margin: 0; font-size: clamp(22px, 1.9vw, 30px); letter-spacing: .14em; color: var(--text); text-shadow: 0 2px 8px #090410; }
+#topbar #sync { margin: 0 0 0 auto; padding: 5px 14px; font-family: var(--font-body); font-size: 13px; font-style: normal; color: var(--text);
+  background: var(--surface-deep); border: 1px solid var(--control-border); border-radius: 999px; display: inline-flex; align-items: center; gap: 8px; }
+#topbar #sync::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: var(--positive); box-shadow: 0 0 8px var(--positive); }
+#topbar #sync.off { color: var(--warning); }
+#topbar #sync.off::before { background: var(--warning); box-shadow: 0 0 8px var(--warning); }
+#topbar #presence { position: static; margin: 0; padding: 4px 12px; top: auto; left: auto; transform: none; display: flex; gap: 8px 14px; align-items: center; font-size: 14px; }
+#topbar #presence[hidden] { display: none; }
+#map-space {
+  grid-area: map; position: relative; isolation: isolate; overflow: hidden; min-width: 0; min-height: 0;
+  padding: 0; background: #0c0813; border: 1px solid var(--panel-border); border-radius: var(--panel-radius); box-shadow: var(--panel-shadow);
+}
+#map-space::before, #map-space::after { display: none; }
+#map-space canvas#c { z-index: 0; }
+#map-space #labels { z-index: 1; }
+#eraHead { position: absolute; inset: 0; z-index: 2; pointer-events: none; }
+#eraHead .eh { position: absolute; top: 10px; transform: translateX(-50%); font-family: var(--font-display); font-size: 15px; font-weight: 700; letter-spacing: .14em; text-transform: uppercase;
+  color: var(--thistle); text-shadow: 0 1px 2px #090410, 0 0 12px rgba(109, 114, 214, .6); white-space: nowrap; }
+#eraHead .ed { position: absolute; top: 0; bottom: 0; width: 1px; background: linear-gradient(180deg, rgba(217, 197, 236, .38), rgba(217, 197, 236, .08) 60%, transparent); }
+#map-space #hint { position: absolute; left: 14px; bottom: 14px; z-index: 3; max-width: min(calc(100% - 225px), 360px); margin: 0; padding: 7px 11px; font-size: 12.5px; line-height: 1.4; color: var(--muted);
+  background: rgba(12, 8, 19, .78); border: 1px solid rgba(217, 197, 236, .22); border-radius: 10px; box-shadow: none; }
+#map-space #hint::before, #map-space #hint::after { display: none; }
+#map-space #mini, body.chat-open #map-space #mini, body:has(#chat:not([hidden])) #map-space #mini {
+  display: block; position: absolute; right: 12px; bottom: 12px; z-index: 3; margin: 0; padding: 8px 10px; width: auto; }
+#map-space #mini canvas { width: 170px; height: auto; }
+#map-space #mini.big canvas { width: min(360px, 60vw); }
+#map-space #mini .mmbar { gap: 8px; margin-top: 6px; }
+#map-space #mini .mmbar span { display: inline-flex; gap: 6px; }
+#map-space #mini small { font-size: 11px; }
+#chat { grid-column: 3; grid-row: 2 / 4; overflow: hidden; }
+#chat .clog { flex: 1 1 0; min-height: 4rem; max-height: none; }
+#chat .chint { font-size: 12px; line-height: 1.35; }
+#labels .lb.tag { font-family: var(--font-body); font-size: 13px; line-height: 1.25; padding: 3px 9px; max-width: 190px; overflow: hidden; text-overflow: ellipsis;
+  color: var(--text); background: rgba(14, 9, 22, .88); border: 1px solid rgba(200, 180, 230, .42); border-radius: 8px; text-shadow: none; box-shadow: 0 2px 6px rgba(3, 1, 8, .6); }
+#labels .lb.tag.nb { border-color: rgba(216, 184, 250, .7); }
+#labels .lb.tag.hov { border-color: #fff; }
+#labels .lb.tag.sel { font-weight: 700; color: #fff; background: #3a2850; border-color: var(--focus); box-shadow: 0 0 0 1px rgba(227, 202, 255, .4), 0 0 16px rgba(190, 150, 255, .55); }
+@media (max-width: 860px) {
+  body:not(.loginpage) {
+    grid-template-rows: auto minmax(16rem, 40dvh) auto auto auto auto;
+    grid-template-areas:
+      "header header"
+      "map map"
+      "legend legend"
+      "strip strip"
+      "detail detail"
+      "controls controls";
+  }
+  #topbar { padding: 8px 14px; }
+  #topbar #title h1 { font-size: 22px; }
+  #map-space #hint { display: none; }
+  #map-space #mini, body.chat-open #map-space #mini, body:has(#chat:not([hidden])) #map-space #mini { position: absolute; right: 8px; bottom: 8px; padding: 6px 8px; }
+  #map-space #mini canvas { width: 120px; }
+  #chat { grid-area: detail; overflow: visible; }
+}
+
+/* backdrop, chat compaction, icons, phone tabs */
+#bg { position: fixed; inset: 0; z-index: 0; width: 100%; height: 100%; pointer-events: none; }
+body.q0 #bg { display: none; }
+#map-space { background: rgba(12, 8, 19, .42); }
+#map-space #mini, body.chat-open #map-space #mini, body:has(#chat:not([hidden])) #map-space #mini { padding: 6px 8px; }
+#map-space #mini canvas { width: 150px; }
+#map-space #mini .mmbar { margin-top: 4px; }
+#map-space #mini .mmbar small { display: none; }
+#map-space #mini button { font-size: 11px; min-height: 26px; padding: 2px 9px; border-radius: 999px; }
+#map-space #mini.big canvas { width: min(380px, 60vw); }
+#chat { gap: 8px; padding: 14px 16px; }
+#chat h2 { font-size: 24px; }
+#chat .cmodes { gap: 6px; }
+#chat .cm { min-height: 38px; padding: 5px 8px; font-size: 13px; line-height: 1.2; }
+#chat .cprov { font-size: 12.5px; color: var(--muted); }
+#chat .cprov summary { cursor: pointer; display: flex; align-items: center; gap: 8px; list-style: none; padding: 2px 0; }
+#chat .cprov summary::-webkit-details-marker { display: none; }
+#chat .cprov summary::after { content: "\25BE"; margin-left: auto; opacity: .8; }
+#chat .cprov[open] summary::after { content: "\25B4"; }
+#chat .cprov .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--muted); flex-shrink: 0; }
+#chat .cprov .dot.on { background: var(--positive); box-shadow: 0 0 8px var(--positive); }
+#chat .cprov .dot.off { background: var(--warning); }
+#chat .cprov .cstat { margin: 4px 0 0 17px; }
+#chat .cf { font-size: 11px; }
+#chat .ctray { max-height: 64px; }
+#chat .ctray .dim { font-size: 13px; }
+#chat .cacts button, #chat .can button { min-height: 36px; padding: 5px 10px; font-size: 13px; }
+#chat .clog { min-height: 3rem; }
+#chat textarea { min-height: 48px; max-height: 120px; font-size: 14px; padding: 7px 9px; }
+#chat .csize { display: none; }
+#chat .chint { font-size: 12px; margin: 0; }
+.pcard .papply { display: flex; align-items: center; gap: 8px; margin-top: 8px; font-size: 13px; color: var(--muted); cursor: pointer; }
+.pcard .papply input { width: 16px; height: 16px; accent-color: var(--thistle); }
+#chat .pnote { margin: 6px 0 0; font-size: 12px; }
+#controls button svg { width: 15px; height: 15px; margin-right: 6px; vertical-align: -2px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
+#tabbar { display: none; }
+#detail .dclose { display: none; }
+@media (max-width: 860px) {
+  html { overflow: hidden; height: 100%; }
+  body:not(.loginpage) {
+    height: 100dvh; min-height: 0; overflow: hidden; gap: 8px; padding: 8px 8px 0;
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto minmax(0, 1fr) auto auto;
+    grid-template-areas: "header" "main" "strip" "tabs";
+  }
+  #topbar { grid-area: header; }
+  #map-space, #legend, #chat, #controls { grid-area: main; display: none; min-height: 0; }
+  #strip { grid-area: strip; display: none; }
+  body.tab-map #map-space, body.tab-map #strip { display: block; }
+  body.tab-map #strip { padding: 8px 10px; }
+  body.tab-map #strip canvas { height: 56px; }
+  body.tab-map #strip .time-nav label { display: none; }
+  body.tab-map #strip .time-nav { padding-top: 6px; }
+  body.tab-layers #legend { display: block; overflow: auto; }
+  body.tab-layers #legend .lnodes { display: block !important; }
+  body.tab-chat #chat, body.tab-chat.chat-open #chat { display: flex; overflow: hidden; height: auto; min-height: 0; }
+  body.tab-chat #chat .cx { display: none; }
+  body.tab-more #controls { display: flex; flex-direction: column; align-items: stretch; align-content: start; justify-content: flex-start; gap: 10px; overflow: auto; }
+  body.tab-more #controls button, body.tab-more #controls label { width: 100%; min-height: 46px; justify-content: flex-start; }
+  #tabbar { grid-area: tabs; display: flex; justify-content: space-around; gap: 2px; padding: 4px 4px max(4px, env(safe-area-inset-bottom)); border-radius: 16px 16px 0 0; margin: 0 -8px; z-index: 7; }
+  #tabbar button { flex: 1; display: flex; flex-direction: column; align-items: center; gap: 2px; padding: 6px 2px; font: inherit; font-size: 11px; color: var(--muted); background: none; border: 0; border-radius: 10px; min-height: 48px; }
+  #tabbar button svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+  #tabbar button.on { color: var(--text); background: var(--surface-high); }
+  /* the node panel slides up over the map as a sheet when a node is selected on the Map tab */
+  body:not(.loginpage) > #detail, body:not(.loginpage) > #detail.editing { display: none; position: fixed; inset: auto 8px 64px 8px; grid-area: auto; z-index: 8; width: auto; max-height: 62dvh; height: auto; overflow: auto; padding: 14px 16px; margin: 0; }
+  body:not(.loginpage).tab-map.node-open > #detail, body:not(.loginpage).tab-map > #detail.editing { display: block; }
+  #detail .dclose { display: block; position: absolute; top: 8px; right: 10px; font: inherit; font-size: 24px; line-height: 1; padding: 2px 8px; color: var(--muted); background: none; border: 0; }
+  body.node-open #map-space #mini { display: none; }
+}
+@media (min-width: 861px) and (max-height: 820px) {
+  #chat .chint, #chat .cprov .cstat { display: none; }
+  #chat .cprov[open] .cstat { display: block; }
+  #chat h2 { font-size: 20px; }
+  #chat .cf { display: none; }
+  #chat .ctray:empty { display: none; }
+}
+
+/* more room for the map: slimmer rails, header, timeline and controls; the right rail folds away when nothing needs it */
+:root { --left-rail: clamp(188px, 14vw, 230px); --right-rail: clamp(296px, 23vw, 380px); --shell-gap: 8px; --shell-pad: 10px; }
+#topbar { min-height: 42px; padding: 3px 14px; gap: 10px 18px; }
+#topbar #title h1 { font-size: clamp(18px, 1.5vw, 24px); }
+#topbar #sync { padding: 3px 12px; font-size: 12px; }
+body:not(.loginpage).rail-empty { grid-template-columns: var(--left-rail) minmax(0, 1fr) 0; }
+body.rail-empty #detail { display: none; }
+body:not(.loginpage).rail-left-off { --left-rail: 44px; }
+body.rail-left-off #legend { padding: 10px 6px; overflow: hidden; }
+body.rail-left-off #legend > :not(h2) { display: none; }
+body.rail-left-off #legend h2 { margin: 0; font-size: 0; }
+#legend h2 { display: flex; align-items: center; justify-content: space-between; }
+#legend h2 .ltog { font: inherit; font-size: 22px; line-height: 1; width: 30px; height: 30px; padding: 0; color: var(--muted); background: var(--control-surface); border: 1px solid var(--control-border); border-radius: 8px; cursor: pointer; }
+body.rail-left-off #legend h2 .ltog { transform: rotate(180deg); margin: 0 auto; }
+#legend .layer label { min-height: 36px; padding: 2px 3px; font-size: 14px; }
+#legend .exp { width: 30px; }
+#strip { display: block; padding: 6px 10px; }
+#strip canvas { height: 46px; }
+#strip .time-nav { padding-top: 5px; grid-template-columns: auto auto minmax(0, 1fr) auto; gap: 6px; }
+#strip .time-nav label { grid-column: auto; font-size: 11px; }
+#strip .time-nav button, #strip .time-nav select { min-height: 32px; padding: 3px 8px; font-size: 13px; }
+#controls { padding: 5px 10px; gap: 6px; }
+#controls button, #controls select { min-height: 36px; padding: 4px 11px; font-size: 13px; }
+#controls label { min-height: 36px; }
+#detail, #detail.editing { padding: 12px 14px; }
+#chat { padding: 10px 12px; }
+@media (max-width: 860px) {
+  body:not(.loginpage).rail-empty, body:not(.loginpage).rail-left-off { grid-template-columns: minmax(0, 1fr); --left-rail: 0; }
+  body:not(.loginpage).rail-empty.tab-map.node-open > #detail { display: block; }
+  #legend h2 .ltog { display: none; }
+  body.rail-left-off #legend > :not(h2) { display: block; }
+  body.rail-left-off #legend h2 { font-size: 21px; }
+  body:not(.tab-map) #strip { display: none; }
+}

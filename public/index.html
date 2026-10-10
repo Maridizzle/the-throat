@@ -11,27 +11,29 @@
 <link rel="stylesheet" href="css/throat.css">
 </head>
 <body class="q2">
-<canvas id="c" aria-label="Story map. Drag to orbit, scroll to fly in and out."></canvas>
-<div id="labels" aria-hidden="true"></div>
+<canvas id="bg" aria-hidden="true"></canvas>
 <div class="vig"></div>
 <div class="grain"></div>
 
-<div class="panel" id="title">
-  <h1>THE THROAT</h1>
+<header class="panel" id="topbar">
+  <div id="title"><h1>THE THROAT</h1></div>
   <p id="sync">Connecting...</p>
-</div>
+  <div id="presence" hidden aria-label="Who is online"></div>
+</header>
 
-<div class="panel" id="presence" hidden aria-label="Who is online"></div>
+<main id="map-space" class="panel" aria-label="Story map">
+  <canvas id="c" aria-label="Story map. Drag to orbit, scroll to fly in and out."></canvas>
+  <div id="labels" aria-hidden="true"></div>
+  <div id="eraHead" aria-hidden="true"></div>
+  <div id="hint">Drag to orbit. Scroll to zoom. Click the map, then W / S glide and A / D turn. Click a node, or the timeline below, to fly there.</div>
+  <div class="panel" id="mini"><canvas id="mm" width="200" height="100"></canvas><div class="mmbar"><small>OVERVIEW</small><span><button id="mmView" type="button" aria-label="Switch the overview between top-down and side view">Top</button> <button id="mmBig" type="button" aria-label="Make the overview larger or smaller">Expand</button></span></div></div>
+</main>
 
 <div class="panel" id="legend"><h2>Layers</h2></div>
 
 <div class="panel" id="detail" aria-live="polite"></div>
 
-<div class="panel" id="hint">Drag to orbit. Scroll to fly in and out. W / S glide, A / D turn. Click a node, or the timeline below, to fly there.</div>
-
 <div class="panel" id="strip"><canvas id="st" aria-label="Timeline. Click or drag to fly along story time."></canvas><div id="stTip"></div></div>
-
-<div class="panel" id="mini"><canvas id="mm" width="200" height="100"></canvas><div class="mmbar"><small>OVERVIEW</small><button id="mmView" type="button" aria-label="Switch the overview between top-down and side view">Top</button></div></div>
 
 <div class="panel" id="controls">
   <label>Quality
@@ -47,6 +49,14 @@
   <button id="chatBtn" type="button">Chat</button>
   <button id="hiddenBtn" type="button" style="display:none">Hidden (0)</button>
 </div>
+
+<nav id="tabbar" class="panel" aria-label="Sections">
+  <button type="button" data-tab="map" class="on"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3 5l5-2 4 2 5-2v12l-5 2-4-2-5 2z"/><path d="M8 3v12M12 5v12"/></svg>Map</button>
+  <button type="button" data-tab="chat"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3 4h14v9H8l-4 3v-3H3z"/></svg>Chat</button>
+  <button type="button" data-tab="layers"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 3l7 4-7 4-7-4z"/><path d="M3 11l7 4 7-4M3 14l7 4 7-4"/></svg>Layers</button>
+  <button type="button" data-tab="history"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3 10a7 7 0 1 0 2-5"/><path d="M3 3v4h4M10 6v4l3 2"/></svg>History</button>
+  <button type="button" data-tab="more"><svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="4" cy="10" r="1.5"/><circle cx="10" cy="10" r="1.5"/><circle cx="16" cy="10" r="1.5"/></svg>More</button>
+</nav>
 
 <div id="toast" role="status" aria-live="polite"></div>
 

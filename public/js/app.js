@@ -211,18 +211,22 @@ function resize() {
 addEventListener("resize", resize);
 // Keep original full-window projection/picking coordinates, but place the map's
 // focal point in the available reading-layout cell rather than behind the chat.
-let mapViewSignature = "";
+let mapViewSignature = "", mapRect = null;
 function updateMapViewport() {
   const space = document.getElementById("map-space");
   if (!space || !W || !H) return;
   const r = space.getBoundingClientRect();
   if (r.width < 1 || r.height < 1) return;
+  mapRect = r;
   const x = Math.round(W / 2 - r.left - r.width / 2);
   const y = Math.round(H / 2 - r.top - r.height / 2);
-  const signature = [W, H, x, y].join(":");
+  const signature = [W, H, x, y, Math.round(r.width), Math.round(r.height), Math.round(r.left), Math.round(r.top)].join(":");
   if (signature !== mapViewSignature) {
     mapViewSignature = signature;
     camera.setViewOffset(W, H, x, y, W, H);
+    // The scene renders full-window (so picking stays simple) but only shows inside the map frame.
+    const clip = "inset(" + Math.max(0, r.top) + "px " + Math.max(0, W - r.right) + "px " + Math.max(0, H - r.bottom) + "px " + Math.max(0, r.left) + "px round 17px)";
+    cv.style.clipPath = clip; $("labels").style.clipPath = clip;
   }
 }
 
@@ -529,7 +533,8 @@ function openLayerPopup(k) {
 function buildLegend() {
   const lg = $("legend"), counts = {};
   for (const n of graph.nodes) counts[n.type] = (counts[n.type] || 0) + 1;
-  lg.replaceChildren(el("h2", null, "Layers"));
+  lg.replaceChildren(el("h2", null, "Layers", el("button", { type: "button", class: "ltog", "aria-label": "Collapse or expand the Layers rail", title: "Collapse the Layers rail",
+    onclick: () => { const off = document.body.classList.toggle("rail-left-off"); try { localStorage.setItem("throat.railLeft", off ? "off" : "on"); } catch (e) { /* ignore */ } } }, "\u2039")));
   for (const k of TYPE_ORDER) {
     if (k === "other" && !counts.other) continue;
     const t = TYPES[k];
@@ -588,6 +593,7 @@ function showDetail() {
   const list = el("ul");
   for (const x of nb) list.append(el("li", null, el("button", { class: "nb", type: "button", onclick: () => select(x.node.id) }, x.node.name), x.label ? " " : null, x.label ? el("span", { class: "lkl" }, x.label) : null));
   d.replaceChildren(
+    el("button", { type: "button", class: "dclose", "aria-label": "Close node details", onclick: () => select(null) }, "\u00d7"),
     el("span", { class: "chip cin", style: "color:" + t.hex }, t.label),
     el("h2", null, n.name),
     el("div", { class: "f" }, "Summary"),
@@ -618,6 +624,7 @@ function select(id) {
   }
   selectedId = id && graph.byId.has(id) ? id : null;
   const n = selectedId && graph.byId.get(selectedId);
+  document.body.classList.toggle("node-open", !!n);
   if (n) goal.set(n.x, n.y, n.z);
   refreshLinkEmphasis();
   showDetail();
@@ -664,7 +671,7 @@ function applyBodyClass() {
   document.body.classList.toggle("calm", calm);
   for (let q = 0; q <= 2; q++) document.body.classList.toggle("q" + q, q === quality);
 }
-$("qsel").addEventListener("change", (e) => { quality = +e.target.value; applyBodyClass(); resize(); buildDust(); buildScene(); refreshLinkEmphasis(); });
+$("qsel").addEventListener("change", (e) => { quality = +e.target.value; applyBodyClass(); resize(); buildDust(); buildScene(); refreshLinkEmphasis(); if (typeof drawBackdrop === "function") drawBackdrop(); });
 const calmBox = $("calm"), mq = matchMedia("(prefers-reduced-motion: reduce)");
 function setCalm(v) { calm = v; calmBox.checked = v; applyBodyClass(); }
 calmBox.addEventListener("change", (e) => setCalm(e.target.checked));
@@ -856,6 +863,7 @@ function openLightbox(ims, start) {
 const confirmDiscard = () => !editingDirty() || confirm("Discard your unsaved changes to this node?");
 function startEdit(n) {
   if (chat.open) chatToggle(false); // the editor lives in the node panel, which the chat hides
+  if (typeof setTab === "function" && matchMedia("(max-width: 860px)").matches) setTab("map");
   if (editing && !confirmDiscard()) return;
   const row = n && model.rows.get(n.id);
   editing = { id: n ? n.id : uid("n_"), isNew: !n, baseRev: row ? row.rev : null, base: row ? deepCopy(row.data || {}) : {} };
@@ -1556,13 +1564,14 @@ const chatSendBtn = el("button", { type: "button", class: "primary", onclick: ()
 const chatAddSel = el("button", { type: "button", onclick: () => chatAdd(selectedId) }, "Add selected node");
 const chatEl = el("aside", { class: "panel", id: "chat", hidden: "", "aria-label": "Story chat" },
   el("div", { class: "chead" }, el("h2", null, "Story chat"), el("button", { type: "button", class: "cx", "aria-label": "Close the chat", onclick: () => chatToggle(false) }, "×")),
-  chatModes, chatStatus,
+  chatModes,
+  el("details", { class: "cprov" }, el("summary", null, el("i", { class: "dot" }), "Provider status and spending"), chatStatus),
   el("div", { class: "cf" }, "Pinned (always sent in full)"), chatTray,
   el("div", { class: "cacts" }, chatAddSel),
   chatLog,
   el("div", { class: "can" }, el("span", { class: "cf" }, "Analyze"), ...Object.keys(ANALYSES).map((k) => el("button", { type: "button", title: ANALYSES[k].label, onclick: () => chatAnalyze(k) }, { story: "Story", characters: "Characters", conflict: "Conflict", arc: "Arc" }[k]))),
   el("div", { class: "ccomp" }, chatIn, chatSize, el("div", { class: "cacts" }, chatSendBtn, el("button", { type: "button", class: "quiet", onclick: () => { chat.msgs = []; renderLog(); } }, "Clear chat")),
-    el("p", { class: "dim chint" }, "The chat sees an index of your whole map and reads full nodes when your question needs them. Ask it to add, link or change things and it shows proposals here. Nothing changes until you tick it and press Apply. A backup is made first. Edits to existing nodes are more accurate on OpenAI, which asks first.")));
+    el("p", { class: "dim chint" }, "Map context, proposals and backups retained. Nothing changes until you tick a proposal and press Apply.")));
 document.body.append(chatEl);
 
 function modeLabel(m) { return m === "openai" ? "OpenAI" : "Groq"; }
@@ -1578,6 +1587,7 @@ function renderChat() {
     return el("button", { type: "button", class: "cm" + (chat.mode === m ? " sel" : "") + (on ? "" : " off"), "aria-pressed": chat.mode === m ? "true" : "false",
       title: on ? "" : "Not set up on the server: " + (p ? p.reason : ""), onclick: () => { chat.mode = m; renderChat(); } }, modeLabel(m) + (m === "openai" ? " (costs money)" : " (cheapest)"));
   }));
+  const dot = chatEl.querySelector(".cprov .dot"); if (dot) dot.className = "dot" + (st && st[chat.mode] && st[chat.mode].configured ? " on" : " off");
   if (!st) chatStatus.textContent = "Checking the AI settings...";
   else {
     const p = st[chat.mode];
@@ -1587,7 +1597,7 @@ function renderChat() {
   }
   chatTray.replaceChildren(...(trayNodes().length ? trayNodes().map((n) => el("span", { class: "tchip", style: "color:" + TYPES[n.type].hex },
     el("span", { class: "tn" }, n.name), el("button", { type: "button", "aria-label": "Remove " + n.name + " from the chat", onclick: () => { chat.tray = chat.tray.filter((x) => x !== n.id); renderChat(); } }, "×")))
-    : [el("span", { class: "dim" }, "Nothing pinned. The AI sees an index of the whole map and picks what it needs. The node you have selected is always included.")]));
+    : [el("span", { class: "dim" }, "Nothing pinned. The selected node is always included.")]));
   const sel = selectedId && graph.byId.get(selectedId);
   chatAddSel.disabled = !sel || chat.tray.includes(selectedId);
   chatAddSel.textContent = sel ? (chat.tray.includes(selectedId) ? "Selected node is added" : "Add “" + sel.name.slice(0, 22) + (sel.name.length > 22 ? "..." : "") + "”") : "Add selected node";
@@ -1625,6 +1635,7 @@ function chatToggle(open) {
   chat.open = open;
   chatEl.hidden = !open;
   document.body.classList.toggle("chat-open", open);
+  if (open && typeof setTab === "function" && matchMedia("(max-width: 860px)").matches && !document.body.classList.contains("tab-chat")) setTab("chat");
   if (open) { renderChat(); renderLog(); refreshAiStatus(); chatIn.focus(); }
 }
 function chatAdd(id) {
@@ -1889,33 +1900,34 @@ function buildCard(it, items, sync, locked) {
   const box = el("input", { type: "checkbox", "aria-label": "Apply this proposal: " + itemTitle(it) });
   box.checked = it.checked; box.disabled = !!locked; box.addEventListener("change", () => { it.checked = box.checked; sync(); });
   const card = el("div", { class: "pcard" + (it.grounded ? "" : " ungrounded") });
-  card.append(el("label", { class: "ph" }, box, el("span", { class: "pk" }, KIND_LABEL[it.kind]), el("strong", null, itemTitle(it)), it.kind === "create" ? el("span", { class: "pt" }, TYPES[it.type].label) : null));
+  card.append(el("div", { class: "ph" }, el("span", { class: "pk" }, KIND_LABEL[it.kind]), el("strong", null, itemTitle(it)), it.kind === "create" ? el("span", { class: "pt" }, TYPES[it.type].label) : null));
   if (!it.grounded) card.append(el("p", { class: "warn" }, "Not found in your text. This may be invented. It is unticked."));
   if (it.kind === "replace") card.append(el("p", { class: "warn" }, "This replaces existing text. It starts unticked, and applying it only works if that exact passage is still there."));
   card.append(el("div", { class: "pq" }, el("small", null, "Quote the AI relied on"), el("blockquote", null, it.quote || "(none given)")));
   if (it.kind === "create") {
     card.append(el("div", { class: "padd" }, it.summary || el("span", { class: "dim" }, "(no summary)")));
   } else if (it.kind === "replace") {
-    card.append(el("div", { class: "pold" }, el("small", null, "Old text"), el("div", { class: "pstrike" }, it.find)));
-    card.append(el("div", { class: "padd note" }, el("small", null, "New text"), el("div", null, it.with || "(removed)")));
+    card.append(el("div", { class: "pold" }, el("small", null, "Before"), el("div", { class: "pstrike" }, it.find)));
+    card.append(el("div", { class: "padd note" }, el("small", null, "After"), el("div", null, it.with || "(removed)")));
   } else {
     const n = graph.byId.get(it.id), tail = n.summary.length > 140 ? "..." + n.summary.slice(-140) : n.summary;
-    card.append(el("div", { class: "pold" }, el("small", null, "Stays exactly as it is"), el("div", null, tail || "(empty)")));
-    if (it.append) card.append(el("div", { class: "padd note" }, el("small", null, "Added at the end"), el("div", null, it.append)));
+    card.append(el("div", { class: "pold" }, el("small", null, "Before (stays exactly as it is)"), el("div", null, tail || "(empty)")));
+    if (it.append) card.append(el("div", { class: "padd note" }, el("small", null, "After (added at the end)"), el("div", null, it.append)));
   }
   for (const l of it.links || []) card.append(el("div", { class: "padd" }, "Link to " + linkTarget(l.to, items) + (l.label ? " (" + l.label + ")" : "")));
   if (it.time) card.append(el("div", { class: "padd" }, "Story time: " + timeText(it.time)));
+  card.append(el("label", { class: "papply" }, box, "Apply this change to your map"));
   return card;
 }
 // The proposals shown inside the AI's reply in the chat. Nothing is applied until the writer ticks it and presses Apply.
 function proposalBlock(set) {
   const wrap = el("div", { class: "pblock" });
   const btn = el("button", { type: "button", class: "primary" }, "");
-  const sync = () => { const n = set.items.filter((x) => x.checked).length; btn.disabled = !!set.applied || !n; btn.textContent = set.applied ? "Applied" : n ? "Apply " + n + " selected (a backup is made first)" : "Nothing selected"; };
+  const sync = () => { const n = set.items.filter((x) => x.checked).length; btn.disabled = !!set.applied || !n; btn.textContent = set.applied ? "Applied" : n ? "Apply selected (" + n + ")" : "Apply selected"; };
   wrap.append(el("p", { class: "dim" }, set.applied ? "These proposals were applied." : set.items.length + " proposal" + (set.items.length === 1 ? "" : "s") + ". Nothing has been changed. Tick what you want."));
   for (const it of set.items) wrap.append(buildCard(it, set.items, sync, set.applied));
   btn.addEventListener("click", () => applyItems(set, btn, () => { set.applied = true; renderLog(); }));
-  wrap.append(btn);
+  wrap.append(btn, el("p", { class: "dim pnote" }, "Nothing changes without approval. A backup is made first."));
   if (set.skipped && set.skipped.length) wrap.append(el("details", { class: "craw" }, el("summary", null, set.skipped.length + " thing" + (set.skipped.length === 1 ? "" : "s") + " could not be used"), el("ul", null, ...set.skipped.map((x) => el("li", null, x)))));
   sync();
   return wrap;
@@ -2130,9 +2142,69 @@ chatIn.addEventListener("input", () => { updateSize(); chatSendBtn.disabled = ch
 chatIn.addEventListener("keydown", (e) => { if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); chatSend(); } });
 $("chatBtn").addEventListener("click", () => chatToggle(!chat.open));
 
+/* icons on the bottom bar (inline SVG, decorative) */
+const ICONS = {
+  reset: '<path d="M4 10a6 6 0 1 1 2 4.5"/><path d="M4 15v-4h4"/>', newNode: '<circle cx="10" cy="10" r="7"/><path d="M10 6v8M6 10h8"/>',
+  erasBtn: '<path d="M4 4h12v12H4z"/><path d="M4 8h12M8 4v12"/>', importBtn: '<path d="M10 3v10M6 9l4 4 4-4"/><path d="M4 16h12"/>',
+  exportBtn: '<path d="M10 13V3M6 7l4-4 4 4"/><path d="M4 16h12"/>', historyBtn: '<path d="M3 10a7 7 0 1 0 2-5"/><path d="M3 3v4h4M10 6v4l3 2"/>',
+  chatBtn: '<path d="M3 4h14v9H8l-4 3v-3H3z"/>', hiddenBtn: '<path d="M3 3l14 14"/><path d="M8 5a8 8 0 0 1 9 5 9 9 0 0 1-2.5 3M4 7a9 9 0 0 0-2 3 8 8 0 0 0 11 4"/>',
+};
+for (const id in ICONS) { const b = $(id); if (!b) continue; const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg"); svg.setAttribute("viewBox", "0 0 20 20"); svg.setAttribute("aria-hidden", "true"); svg.innerHTML = ICONS[id]; b.prepend(svg); }
+
+/* backdrop: a misty field of ruined spires drawn once per size, behind everything. Pure code, no image files.
+ * Three depth layers, farther ones paler, with mist bands between them. Skipped on Low quality. */
+const bgC = $("bg");
+function drawBackdrop() {
+  const w = innerWidth, h = innerHeight;
+  bgC.width = w; bgC.height = h;
+  const g = bgC.getContext("2d"); g.clearRect(0, 0, w, h);
+  if (quality === 0) return;
+  const r = rng(90210);
+  const sky = g.createLinearGradient(0, 0, 0, h); sky.addColorStop(0, "#1a1126"); sky.addColorStop(.55, "#120c1d"); sky.addColorStop(1, "#0b0814");
+  g.fillStyle = sky; g.fillRect(0, 0, w, h);
+  const glow = g.createRadialGradient(w * .62, h * .22, 10, w * .62, h * .22, Math.max(w, h) * .55); glow.addColorStop(0, "rgba(140,100,190,.34)"); glow.addColorStop(.45, "rgba(90,60,140,.14)"); glow.addColorStop(1, "rgba(0,0,0,0)");
+  g.fillStyle = glow; g.fillRect(0, 0, w, h);
+  const layers = [{ base: .62, hMin: .18, hMax: .5, col: "#2a1c3b", n: 9 }, { base: .74, hMin: .2, hMax: .58, col: "#1d1329", n: 8 }, { base: .88, hMin: .22, hMax: .62, col: "#120b1c", n: 7 }];
+  layers.forEach((L, li) => {
+    for (let i = 0; i < L.n; i++) {
+      const cx = (i + r() * .9) / L.n * w * 1.15 - w * .07, top = h * (L.base - (L.hMin + r() * (L.hMax - L.hMin))), wd = w * (.03 + r() * .06), bw = wd * (1.6 + r());
+      g.beginPath(); g.moveTo(cx - bw, h);
+      const steps = 4 + Math.floor(r() * 4);
+      for (let k = 0; k <= steps; k++) { const t = k / steps; g.lineTo(cx - bw + (bw - wd * .35) * t + (r() - .5) * wd * .5, h - (h - top) * (t * t * .9 + t * .1)); }
+      g.lineTo(cx + wd * (.2 + r() * .3), top - h * .02 * r());
+      for (let k = steps; k >= 0; k--) { const t = k / steps; g.lineTo(cx + bw - (bw - wd * .35) * t + (r() - .5) * wd * .5, h - (h - top) * (t * t * .9 + t * .1)); }
+      g.lineTo(cx + bw, h); g.closePath(); g.fillStyle = L.col; g.fill();
+      g.strokeStyle = "rgba(190,160,230," + (.05 + li * .03) + ")"; g.lineWidth = 1; g.stroke();
+    }
+    const mist = g.createLinearGradient(0, h * (L.base - .16), 0, h * (L.base + .06)); mist.addColorStop(0, "rgba(120,90,160,0)"); mist.addColorStop(.5, "rgba(120,90,160," + (.16 - li * .03) + ")"); mist.addColorStop(1, "rgba(120,90,160,0)");
+    g.fillStyle = mist; g.fillRect(0, 0, w, h);
+  });
+  for (let i = 0; i < 70; i++) { g.fillStyle = "rgba(230,215,250," + (.15 + r() * .5) + ")"; const sz = .6 + r() * 1.3; g.fillRect(r() * w, r() * h * .55, sz, sz); }
+  const floor = g.createLinearGradient(0, h * .78, 0, h); floor.addColorStop(0, "rgba(11,8,20,0)"); floor.addColorStop(1, "rgba(11,8,20,.9)");
+  g.fillStyle = floor; g.fillRect(0, 0, w, h);
+}
+addEventListener("resize", drawBackdrop);
+drawBackdrop();
+
+/* phone: a bottom tab bar switches between the map, the chat, the layers, History and the controls. On wide screens it is hidden. */
+const tabbar = $("tabbar");
+function setTab(name) {
+  for (const t of ["map", "chat", "layers", "more"]) document.body.classList.toggle("tab-" + t, t === name);
+  for (const b of tabbar.querySelectorAll("button")) b.classList.toggle("on", b.dataset.tab === name);
+  if (name === "chat") { if (!chat.open) chatToggle(true); } else if (chat.open && matchMedia("(max-width: 860px)").matches) chatToggle(false);
+  if (name === "chat") { renderChat(); renderLog(); }
+}
+tabbar.addEventListener("click", (e) => {
+  const b = e.target.closest("button"); if (!b) return;
+  if (b.dataset.tab === "history") { openHistory(); return; }
+  setTab(b.dataset.tab);
+});
+
+setTab("map");
+
 
 /* ---------- labels ---------- */
-const labelPool = [], NEAR_PX = 80;
+const labelPool = [], NEAR_PX = 80, TAG_CAP = 60;
 function labelAt(i) {
   if (!labelPool[i]) { const d = el("div", { class: "lb" }); $("labels").append(d); labelPool[i] = d; }
   return labelPool[i];
@@ -2147,8 +2219,30 @@ function pxPerUnit(pos) { return H / (2 * Math.tan(camera.fov * Math.PI / 360) *
 
 /* ---------- loop ---------- */
 let last = performance.now(), time = 0;
+// Era names as column headers along the top of the map frame, with a faint divider where one era ends.
+const eraHeadEl = $("eraHead"), eraPool = [];
+function drawEraHead() {
+  const lay = graph.lay, r = mapRect;
+  let k = 0;
+  if (lay.hasHelix && r && lay.bands.some((b) => b.key !== "")) {
+    const edges = lay.bands.map((b, i) => xOfU(b.u0 - (i === 0 ? .5 : HX.GAP / 2), lay)); edges.push(xOfU(lay.bands[lay.bands.length - 1].u1 + .5, lay));
+    const sx = (x) => { const p = toScreen(tmpE.set(x, 0, 0)); return p ? p.x - r.left : null; };
+    const put = (cls, x, text) => { let d = eraPool[k]; if (!d) { d = el("div"); eraHeadEl.append(d); eraPool[k] = d; } k++; d.className = cls; d.textContent = text; d.style.left = Math.round(x) + "px"; d.style.display = ""; };
+    let lastMid = -1e9, lastW = 0;
+    lay.bands.forEach((b, i) => {
+      const x0 = sx(edges[i]), x1 = sx(edges[i + 1]);
+      if (x0 === null || x1 === null) return;
+      const mid = (x0 + x1) / 2, w = b.name.length * 9.5 + 16;
+      if (b.name && mid > 20 && mid < r.width - 20 && mid - w / 2 > lastMid + lastW / 2 + 6) { put("eh", mid, b.name); lastMid = mid; lastW = w; }
+      if (i > 0 && x0 > 2 && x0 < r.width - 2) put("ed", x0, "");
+    });
+  }
+  for (; k < eraPool.length; k++) eraPool[k].style.display = "none";
+}
 let swayPrev = 0;
+try { if (localStorage.getItem("throat.railLeft") === "off") document.body.classList.add("rail-left-off"); } catch (e) { /* ignore */ }
 function frame(now) {
+  document.body.classList.toggle("rail-empty", !selectedId && !editing && !chat.open);
   const dt = Math.min(.05, (now - last) / 1000); last = now; time += dt;
   const sp = (keys.has("shift") ? 2 : 1) * 320 * dt;
   if (keys.has("w") || keys.has("s")) { const dir = keys.has("w") ? -1 : 1; goal.x += Math.sin(cam.yaw) * sp * dir; goal.z += Math.cos(cam.yaw) * sp * dir; }
@@ -2230,35 +2324,37 @@ function frame(now) {
   // labels
   let li = 0;
   const showLabel = (txt, pos, cls, dy, color, alpha) => {
-    const s = toScreen(pos); if (!s || li >= 24) return;
+    const s = toScreen(pos); if (!s || li >= TAG_CAP + 40) return;
     const d = labelAt(li++); d.textContent = txt; d.className = "lb" + (cls ? " " + cls : "");
     d.style.color = color || "";
     d.style.opacity = alpha == null ? "" : alpha.toFixed(2);
     d.style.display = "block";
     d.style.transform = `translate(${Math.round(s.x)}px,${Math.round(s.y + dy)}px) translateX(-50%)`;
   };
-  const want = new Set();
-  if (selectedId) want.add(selectedId);
-  if (hoverId) want.add(hoverId);
-  for (const id of nbrIds) want.add(id);
-  for (const id of want) { const o = objs.byId && objs.byId.get(id); if (o && o.sprite.visible) showLabel(o.n.name, o.sprite.position, "", o.R * pxPerUnit(o.sprite.position) * 1.5 + 8); }
-  // Desktop mouse only: a name fades in as the pointer nears a node (within NEAR_PX of its edge) and fades out as it leaves.
+  // A name tag on every node: the selected, hovered and linked ones first, then nearest first, skipping any tag
+  // that would overlap one already placed, up to TAG_CAP. Farther tags fade a little so the front stays readable.
+  const placed = [];
+  const fits = (x, y, w, h) => { for (const p of placed) if (x < p.x + p.w && p.x < x + w && y < p.y + p.h && p.y < y + h) return false; placed.push({ x, y, w, h }); return true; };
+  const cands = [];
   for (const o of objs) {
-    let target = 0;
-    if (mouseOn && !dragging && o.sprite.visible) {
-      const s = toScreen(o.sprite.position);
-      if (s) { const gap = Math.hypot(mx - s.x, my - s.y) - o.R * pxPerUnit(o.sprite.position); target = gap <= 0 ? 1 : Math.max(0, 1 - gap / NEAR_PX); }
-    }
-    o.near = (o.near || 0) + (target - (o.near || 0)) * (1 - Math.exp(-dt * (calm ? 5 : 9)));
-    if (o.near < .03) o.near = 0;
-    if (o.near > 0 && !want.has(o.n.id)) showLabel(o.n.name, o.sprite.position, "", o.R * pxPerUnit(o.sprite.position) * 1.5 + 8, "", o.near);
+    if (!o.sprite.visible) continue;
+    const sp = toScreen(o.sprite.position); if (!sp) continue;
+    const pri = o.n.id === selectedId ? 0 : o.n.id === hoverId ? 1 : nbrIds.has(o.n.id) ? 2 : 3;
+    cands.push({ o, sp, pri, d: camera.position.distanceTo(o.sprite.position) });
+  }
+  cands.sort((p, q) => p.pri - q.pri || p.d - q.d);
+  let shown = 0;
+  for (const c of cands) {
+    if (shown >= TAG_CAP) break;
+    const w = Math.min(190, c.o.n.name.length * 7.4 + 22), h = 26, rpx = c.o.R * pxPerUnit(c.o.sprite.position);
+    let dy = rpx * 2.1 + 6; // below the node, else above it
+    if (!fits(c.sp.x - w / 2, c.sp.y + dy, w, h)) { dy = -(rpx * 2.1 + 6 + h); if (!fits(c.sp.x - w / 2, c.sp.y + dy, w, h)) continue; }
+    const alpha = c.pri < 3 ? 1 : Math.max(.5, Math.min(1, 1.35 - c.d / 2000));
+    showLabel(c.o.n.name, c.o.sprite.position, "tag" + (c.pri === 0 ? " sel" : c.pri === 1 ? " hov" : c.pri === 2 ? " nb" : ""), dy, "", alpha);
+    shown++;
   }
   for (const l of linkObjs) if (l.sel && l.line.visible && l.link.label) showLabel(l.link.label, l.curve.getPoint(.5), "lk", -6);
-  if (graph.lay.hasHelix) {
-    // era names float above the flow, centered on their zone
-    const lay = graph.lay;
-    for (const b of lay.bands) if (b.name) showLabel(b.name, tmpE.set(xOfU((b.u0 + b.u1) / 2, lay), 170, 0), "era", 0);
-  }
+  drawEraHead();
   for (const e of presShow) showLabel(e.p.name + (e.p.editing ? " is editing" : ""), e.o.sprite.position, "pres", -(e.o.R * pxPerUnit(e.o.sprite.position) * 2.3 + 12), e.p.color);
   for (; li < labelPool.length; li++) labelPool[li].style.display = "none";
 
@@ -2279,7 +2375,7 @@ function stripGeometry(w) {
 const stX = (u, g) => g.padX + ((u + .5) / (graph.lay.U + 1)) * g.timedW;
 function drawStrip() {
   const lay = graph.lay;
-  strip.style.display = graph.nodes.length ? "block" : "none";
+  strip.style.display = graph.nodes.length ? "" : "none"; // the stylesheet decides where it shows
   const cssW = st.clientWidth, cssH = st.clientHeight;
   if (!graph.nodes.length || !cssW || !cssH) return;
   const dpr = Math.min(devicePixelRatio || 1, 2);
@@ -2366,7 +2462,7 @@ function syncTimeNav() {
   if (signature !== timeNavSignature) {
     timeNavSignature = signature;
     timeChoice.replaceChildren(el("option", { value: "" }, "Choose a node…"),
-      ...nodes.map((n) => el("option", { value: n.id }, n.name + " — " + whenText(n))));
+      ...nodes.map((n) => el("option", { value: n.id }, n.name + ", " + whenText(n))));
   }
   timeChoice.value = nodes.some((n) => n.id === selectedId) ? selectedId : "";
   const at = nodes.findIndex((n) => n.id === selectedId);
@@ -2387,6 +2483,7 @@ timeNext.addEventListener("click", () => {
 const mm = $("mm"), mctx = mm.getContext("2d");
 let miniSide = false; // false: top-down (X across, Z down). true: side view (X across, height up)
 $("mmView").addEventListener("click", () => { miniSide = !miniSide; $("mmView").textContent = miniSide ? "Side" : "Top"; });
+$("mmBig").addEventListener("click", () => { const big = $("mini").classList.toggle("big"); $("mmBig").textContent = big ? "Shrink" : "Expand"; });
 function drawMini() {
   const w = 200, h = 100, ox = w / 2, oy = h / 2, lay = graph.lay;
   const vOf = (x, y, z) => (miniSide ? -y : z); // vertical screen axis
