@@ -82,8 +82,17 @@
     overview.setAttribute("role", "img");
     overview.setAttribute("aria-label", "Overview of the story map");
   }
+  let pointerFocus = false;
+  map.addEventListener("focus", () => {
+    if (!pointerFocus) document.getElementById("map-space")?.scrollIntoView({
+      block: "center", inline: "nearest", behavior: "auto"
+    });
+  });
   map.addEventListener("pointerdown", () => {
-    if (!document.querySelector(".modal")) focus(map);
+    if (!document.querySelector(".modal")) {
+      pointerFocus = true;
+      try { focus(map); } finally { pointerFocus = false; }
+    }
   });
   // W/A/S/D remain in app.js and are scoped there to this focused canvas.
   map.addEventListener("keydown", (event) => {

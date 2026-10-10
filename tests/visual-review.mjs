@@ -211,7 +211,14 @@ try {
   assert.equal(before.nodes.length, 10);
   assert.equal(before.meta[0].data.eras.length, 2);
   assert.equal(before.nodes.find((n) => n.id === 'review_character').data.images[0].src, jpeg);
-  await page.goto('/');
+  // Writer mode redirects unsigned browsers to sign-in rather than issuing
+  // an HTTP authentication challenge. Exercise the real login form so the
+  // browser receives its isolated writer session before loading the map.
+  await page.goto('/login.html');
+  await page.getByLabel('Name', { exact: true }).fill('Visual review');
+  await page.getByLabel('Password', { exact: true }).fill(writerPassword);
+  await page.getByRole('button', { name: 'Sign in', exact: true }).click();
+  await expect(page).toHaveURL(origin + '/');
   await expect(page.locator('#sync')).toContainText('Synced');
   await expect(page.locator('#legend .layer')).toHaveCount(9);
 
@@ -399,6 +406,11 @@ try {
     assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1),
       'Phone layout has page-level horizontal overflow');
     await screenshot('mobile-map');
+    await page.locator('#controls').scrollIntoViewIfNeeded();
+    await page.locator('#c').focus();
+    const focusedMap = await page.locator('#map-space').boundingBox();
+    assert.ok(focusedMap && focusedMap.y >= 0 && focusedMap.y + focusedMap.height <= 901,
+      'Keyboard focus must reveal the map after scrolling below it');
     await page.locator('#chatBtn').click();
     await expect(page.locator('#chat')).toBeVisible();
     await panelsDoNotOverlap('#controls', '#chat');
@@ -433,8 +445,17 @@ try {
     assert.deepEqual(report.blockedRequests, []);
   });
 } catch (error) {
-  report.results.push({ name: 'Review setup', passed: false, error: error.stack || String(error) });
-  console.error(error);
+  const redact = (text) => String(text).replaceAll(password, '[review credential]').replaceAll(writerPassword, '[review credential]');
+  report.results.push({ name: 'Review setup', passed: false, error: redact(error.stack || String(error)) });
+  console.error(redact(error.stack || String(error)));
+  if (page && !page.isClosed()) {
+    try {
+      // innerText describes the displayed page without serializing form values
+      // or cookies. This makes setup failures useful without exposing passwords.
+      const debug = { url: page.url(), body: (await page.locator('body').innerText()).slice(0, 1800), pageErrors: report.pageErrors };
+      console.error('Review setup page: ' + redact(JSON.stringify(debug)));
+    } catch (debugError) { console.error('Setup page unavailable: ' + redact(debugError.message)); }
+  }
 } finally {
   // A compact preview contains only these neutral local fixtures. The full PNGs
   // and machine-readable accessibility results remain in the review artifact.
