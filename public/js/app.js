@@ -24,9 +24,10 @@ const TYPES = {
   faction: { label: "Faction", hex: "#8FA6C9", shape: "square" },
   lore: { label: "Lore", hex: "#C9B8E6", shape: "pentagon" },
   chapter: { label: "Chapter", hex: "#C98BB0", shape: "octagon" },
+  event: { label: "Event", hex: "#D9A96B", shape: "heptagon" },
   other: { label: "Untyped", hex: "#9A8FB5", shape: "circle" },
 };
-const TYPE_ORDER = ["character", "place", "rule", "thread", "question", "faction", "lore", "chapter", "other"];
+const TYPE_ORDER = ["character", "place", "rule", "thread", "question", "faction", "lore", "chapter", "event", "other"];
 const hex2rgb = (h) => [parseInt(h.slice(1, 3), 16), parseInt(h.slice(3, 5), 16), parseInt(h.slice(5, 7), 16)];
 for (const k in TYPES) TYPES[k].rgb = hex2rgb(TYPES[k].hex);
 const mixc = (a, b, t) => a.map((v, i) => Math.round(v + (b[i] - v) * t));
@@ -246,7 +247,7 @@ function shapePath(c, shape, x, y, r) {
   c.beginPath();
   if (shape === "circle") { c.arc(x, y, r, 0, TAU); return; }
   if (shape === "ring") { c.arc(x, y, r, 0, TAU); c.moveTo(x + r * .55, y); c.arc(x, y, r * .55, 0, TAU, true); return; }
-  const n = { diamond: 4, hexagon: 6, triangle: 3, square: 4, pentagon: 5, octagon: 8 }[shape];
+  const n = { diamond: 4, hexagon: 6, triangle: 3, square: 4, pentagon: 5, heptagon: 7, octagon: 8 }[shape];
   const rot = { hexagon: 0, square: -Math.PI / 4, octagon: Math.PI / 8 }[shape] ?? -Math.PI / 2;
   const k = { diamond: 1.2, square: 1.15, octagon: 1.04 }[shape] || 1.08;
   for (let i = 0; i < n; i++) { const a = rot + i * TAU / n, px = x + Math.cos(a) * r * k, py = y + Math.sin(a) * r * k; i ? c.lineTo(px, py) : c.moveTo(px, py); }
@@ -304,7 +305,7 @@ function gemGeometry(shape, level) {
       hole.absarc(0, 0, .55, 0, TAU, true); path.holes.push(hole);
     }
   } else {
-    const count = { diamond: 4, hexagon: 6, triangle: 3, square: 4, pentagon: 5, octagon: 8 }[shape] || 6;
+    const count = { diamond: 4, hexagon: 6, triangle: 3, square: 4, pentagon: 5, heptagon: 7, octagon: 8 }[shape] || 6;
     const rotation = { hexagon: 0, square: Math.PI / 4, octagon: Math.PI / 8 }[shape] ?? Math.PI / 2;
     const radius = { diamond: 1.13, square: 1.08, octagon: .97 }[shape] || 1;
     for (let i = 0; i < count; i++) {
@@ -494,6 +495,7 @@ const icons = {
   square: '<rect x="3" y="3" width="12" height="12" rx="1.5" fill="currentColor"/>',
   pentagon: '<polygon points="9,1.8 16,7 13.3,15.5 4.7,15.5 2,7" fill="currentColor"/>',
   octagon: '<polygon points="6,2 12,2 16,6 16,12 12,16 6,16 2,12 2,6" fill="currentColor"/>',
+  heptagon: '<polygon points="9,1.6 14.9,4.4 16.4,10.8 12.3,16 5.7,16 1.6,10.8 3.1,4.4" fill="currentColor"/>',
 };
 function el(tag, props, ...kids) {
   const e = document.createElement(tag);
@@ -890,7 +892,7 @@ function renderEditor() {
   const d = $("detail"), base = editing.base;
   d.classList.add("editing");
   const typeSel = el("select", { id: "f-type" }, el("option", { value: "" }, "Choose a type..."));
-  const types = ["character", "place", "rule", "thread", "question", "faction", "lore", "chapter"];
+  const types = ["character", "place", "rule", "thread", "question", "faction", "lore", "chapter", "event"];
   if (base.type && !types.includes(base.type)) types.push(base.type);
   for (const k of types) typeSel.append(el("option", { value: k }, TYPES[k] ? TYPES[k].label : String(k)));
   typeSel.value = base.type || "";
@@ -1324,6 +1326,42 @@ function buildPatch(obj, fromAi) {
     const r = eraOp(work, it);
     items.push({ ...it, status: r.status, why: r.why || "", checked: tick(r.status === "new" && kind === "era-add") });
   });
+  const newNames = new Map(); // name key -> node item, for links between nodes created by this patch
+  if (!fromAi) arr("nodes").forEach((n, i) => {
+    const where = "Node " + (i + 1) + (n && typeof n.name === "string" ? " (" + n.name.slice(0, 40) + ")" : "");
+    if (!n || typeof n !== "object") return problems.push(where + ": not an object");
+    if (typeof n.name !== "string" || !n.name.trim() || n.name.trim().length > LIM.name) return problems.push(where + ": name missing or over " + LIM.name + " characters");
+    const name = n.name.trim();
+    if (typeof n.type !== "string" || !TYPES[n.type]) return problems.push(where + ": unknown type \"" + n.type + "\"");
+    const summary = n.summary == null ? "" : n.summary;
+    if (typeof summary !== "string" || summary.length > LIM.summary) return problems.push(where + ": summary is not text or is over " + LIM.summary + " characters");
+    const order = n.order == null ? null : n.order;
+    if (order !== null && !Number.isFinite(order)) return problems.push(where + ": order is not a number");
+    let era = null;
+    if (n.era != null && n.era !== "") {
+      const ei = typeof n.era === "string" ? eIdx(work, n.era) : -1;
+      if (ei < 0) return problems.push(where + ": no era is named " + q(n.era));
+      era = work[ei].name;
+    }
+    const base = { kind: "node", name, type: n.type, summary, era, order, linkReq: Array.isArray(n.links) ? n.links.slice(0, 30) : [] };
+    if (graph.nodes.some((x) => nameKey(x.name) === nameKey(name))) return items.push({ ...base, links: [], status: "have", why: "a node with that name already exists, so nothing is created", checked: false });
+    if (newNames.has(nameKey(name))) return problems.push(where + ": another new node in this patch has the same name");
+    const it = { ...base, links: [], status: "new", why: "", checked: tick(true) };
+    newNames.set(nameKey(name), it);
+    items.push(it);
+  });
+  for (const it of newNames.values()) { // links from a new node: to an existing node or to another new node, by exact name
+    for (const l of it.linkReq) {
+      if (!l || typeof l !== "object") { problems.push("New node " + q(it.name) + ": a link is not an object"); continue; }
+      const label = l.label == null ? "" : l.label;
+      if (typeof label !== "string" || label.length > LIM.label) { problems.push("New node " + q(it.name) + ": a link label is not text or is over " + LIM.label + " characters"); continue; }
+      const tn = typeof l.to === "string" ? nameKey(l.to) : "";
+      const mate = newNames.get(tn), ex = nodeByName(l.to);
+      if (mate && mate !== it) it.links.push({ toName: mate.name, toNew: true, label: label.trim() });
+      else if (ex.node) it.links.push({ toName: ex.node.name, toId: ex.node.id, label: label.trim() });
+      else problems.push("New node " + q(it.name) + ": link to " + (typeof l.to === "string" ? q(l.to) : "nothing") + " could not be matched (" + ex.err + "), so that link is left out");
+    }
+  }
   arr("place").forEach((p, i) => {
     const where = "Placement " + (i + 1);
     if (!p || typeof p !== "object") return problems.push(where + ": not an object");
@@ -1355,6 +1393,7 @@ function buildPatch(obj, fromAi) {
 const ERA_WORDS = { "era-add": "Add era", "era-rename": "Rename era", "era-move": "Move era" };
 function patchText(it) {
   if (it.kind === "link") return it.from.name + " links to " + it.to.name + (it.label ? " (" + it.label + ")" : "");
+  if (it.kind === "node") return "Create " + TYPES[it.type].label.toLowerCase() + " " + q(it.name) + (it.era ? " in " + q(it.era) : ", no era") + (it.links.length ? ", " + it.links.length + " link" + (it.links.length === 1 ? "" : "s") : "");
   if (it.kind === "place") return "Place " + q(it.node.name) + " in " + q(it.era);
   if (it.kind === "era-rename") return "Rename era " + q(it.from) + " to " + q(it.name);
   const pos = it.after === null ? "" : it.after === "" ? ", first" : ", after " + q(it.after);
@@ -1366,7 +1405,7 @@ function patchBlock(set) {
   const sync = () => { const n = set.items.filter((x) => x.checked).length; btn.disabled = !!set.applied || !n; btn.textContent = set.applied ? "Applied" : n ? "Apply selected (" + n + ")" : "Apply selected"; };
   const fresh = set.items.filter((x) => x.status === "new").length;
   wrap.append(el("p", null, set.items.length + " item" + (set.items.length === 1 ? "" : "s") + ": " + fresh + " new, " + (set.items.length - fresh) + " already there or not usable. " + (set.applied ? "Applied." : "Nothing has been changed. Tick what you want.")));
-  const groups = [["Eras", (x) => x.kind.startsWith("era-")], ["Placing nodes in eras", (x) => x.kind === "place"], ["Links", (x) => x.kind === "link"]];
+  const groups = [["Eras", (x) => x.kind.startsWith("era-")], ["New nodes", (x) => x.kind === "node"], ["Placing nodes in eras", (x) => x.kind === "place"], ["Links", (x) => x.kind === "link"]];
   for (const [title, test] of groups) {
     const rows = set.items.filter(test);
     if (!rows.length) continue;
@@ -1376,7 +1415,7 @@ function patchBlock(set) {
       box.checked = it.checked; box.disabled = it.status !== "new" || !!set.applied;
       box.addEventListener("change", () => { it.checked = box.checked; sync(); });
       const note = it.status !== "new" ? it.why : it.kind === "era-rename" || it.kind === "era-move" ? "changes something that exists, so it starts unticked" : set.fromAi ? "suggested by the AI, unticked until you agree" : "new";
-      wrap.append(el("label", { class: "improw patchrow" + (it.status === "new" ? "" : " skip") }, box, el("span", { class: "in" }, patchText(it)), el("small", { class: "st" }, note)));
+      wrap.append(el("label", { class: "improw patchrow" + (it.status === "new" ? "" : " skip"), title: it.kind === "node" ? it.summary.slice(0, 300) : "" }, box, el("span", { class: "in" }, patchText(it)), el("small", { class: "st" }, note)));
     }
   }
   btn.addEventListener("click", () => applyPatchSet(set, btn, () => { set.applied = true; sync(); }));
@@ -1411,6 +1450,32 @@ async function applyPatchSet(set, btn, onDone) {
     }
     if (!done) report.push("The eras kept changing while saving, so none of the era changes were made.");
   }
+  const newNodes = chosen.filter((x) => x.kind === "node"), madeId = new Map(); // name key -> id of nodes created by this patch
+  for (const it of newNodes) madeId.set(nameKey(it.name), uid("n_"));
+  for (const it of newNodes) {
+    if (graph.nodes.some((x) => nameKey(x.name) === nameKey(it.name))) { report.push("Left " + q(it.name) + " alone (a node with that name already exists)."); madeId.delete(nameKey(it.name)); continue; }
+    const data = { type: it.type, name: it.name, summary: it.summary, links: [] };
+    for (const l of it.links) if (!l.toNew && model.rows.has(l.toId)) data.links.push({ to: l.toId, label: l.label }); // links between new nodes are added after all are created
+    if (it.era) {
+      const e = eraList().find((x) => nameKey(x.name) === nameKey(it.era));
+      if (!e) { report.push("Skipped creating " + q(it.name) + ": the era " + q(it.era) + " does not exist (tick the era too). Nothing was created."); madeId.delete(nameKey(it.name)); continue; }
+      data.time = { era: String(e.id), order: it.order };
+    } else if (it.order !== null) data.time = { era: null, order: it.order };
+    let id = madeId.get(nameKey(it.name)), r = await apiWrite("PUT", "/api/nodes/" + id, { data });
+    if (r.status === 409) { const old = id; id = uid("n_"); for (const [k, v] of madeId) if (v === old) madeId.set(k, id); r = await apiWrite("PUT", "/api/nodes/" + id, { data }); }
+    if (r.status === 200 && r.json && r.json.node) { model.rows.set(id, r.json.node); report.push("Created " + q(it.name) + "."); }
+    else { report.push("Could not create " + q(it.name) + " (" + (r.status === 401 ? "your sign-in ended" : "error " + r.status) + ")."); madeId.delete(nameKey(it.name)); }
+  }
+  for (const it of newNodes) { // links from one new node to another, now that both exist
+    const from = madeId.get(nameKey(it.name));
+    if (!from) continue;
+    for (const l of it.links.filter((x) => x.toNew)) {
+      const to = madeId.get(nameKey(l.toName));
+      if (!to) { report.push("Left out the link from " + q(it.name) + " to " + q(l.toName) + " (that node was not created)."); continue; }
+      const res = await applyPatch({ kind: "patch", id: from, links: [{ to, label: l.label }] });
+      if (!res.ok) report.push("Could not add the link from " + q(it.name) + " to " + q(l.toName) + ": " + res.why + ".");
+    }
+  }
   for (const it of chosen.filter((x) => x.kind === "place")) {
     const e = eraList().find((x) => nameKey(x.name) === nameKey(it.era));
     if (!e) { report.push("Skipped placing " + q(it.node.name) + ": the era " + q(it.era) + " does not exist (it was not applied)."); continue; }
@@ -1426,7 +1491,7 @@ async function applyPatchSet(set, btn, onDone) {
   }
   onDone();
   refreshAll(false);
-  const okCount = report.filter((x) => /^(Added|Renamed|Moved|Placed|Linked)/.test(x)).length;
+  const okCount = report.filter((x) => /^(Added|Renamed|Moved|Placed|Linked|Created)/.test(x)).length;
   await choose("Done", el("div", null, el("p", null, okCount + " of " + report.length + " step" + (report.length === 1 ? "" : "s") + " made a change. A backup of the map from just before is in History (the newest “Made by hand”)."),
     el("ul", { class: "chits" }, ...report.map((x) => el("li", null, x)))), [{ id: "ok", label: "Close", kind: "primary" }]);
 }
@@ -1707,7 +1772,7 @@ const ANSWER_SYSTEM = "You are a careful story analyst and editor's assistant fo
   "Reply with ONLY a JSON object and no other text: {\"reply\":\"your answer to the writer, plain text, short paragraphs\",\"proposals\":[...]}. " +
   "Use proposals only when the writer asks you to create, add to or change something, or pastes material that belongs in the map. Otherwise proposals is []. " +
   "Proposals never change the map by themselves: the writer reviews and ticks each one. Kinds: " +
-  "1) {\"kind\":\"create\",\"temp_id\":\"new1\",\"type\":\"character|place|rule|thread|question|faction|lore|chapter|other\",\"name\":\"...\",\"summary\":\"...\",\"links\":[{\"to\":\"<node id or temp_id>\",\"label\":\"...\"}],\"time\":null,\"quote\":\"...\"}. " +
+  "1) {\"kind\":\"create\",\"temp_id\":\"new1\",\"type\":\"character|place|rule|thread|question|faction|lore|chapter|event|other\",\"name\":\"...\",\"summary\":\"...\",\"links\":[{\"to\":\"<node id or temp_id>\",\"label\":\"...\"}],\"time\":null,\"quote\":\"...\"}. " +
   "2) {\"kind\":\"patch\",\"id\":\"<id>\",\"append\":\"<new information to add after the existing summary, or an empty string>\",\"add_links\":[{\"to\":\"<node id or temp_id>\",\"label\":\"...\"}],\"time\":null,\"quote\":\"...\"}. " +
   "3) {\"kind\":\"replace\",\"id\":\"<id>\",\"find\":\"<exact text copied from that node's summary>\",\"with\":\"<new wording>\",\"quote\":\"...\"}. " +
   "Rules: every proposal needs a \"quote\" copied exactly, word for word, from the writer's message or from a node's text, that supports it. " +
