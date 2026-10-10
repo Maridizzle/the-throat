@@ -1399,3 +1399,7 @@ body.rail-left-off #legend h2 .ltog { transform: rotate(180deg); margin: 0 auto;
 #map-space #hint.fade { opacity: 0; pointer-events: none; }
 #map-space #mini canvas { width: 120px; }
 #map-space #mini.big canvas { width: min(380px, 60vw); }
+.patchrow{grid-template-columns:24px 1fr 210px;cursor:pointer}
+.patch h3{margin:14px 0 4px;font-size:13px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted)}
+#patch-text{width:100%;box-sizing:border-box;font-family:ui-monospace,monospace;font-size:12px;margin-bottom:8px}
+@media (max-width:860px){.patchrow{grid-template-columns:24px 1fr}.patchrow .st{grid-column:2}}

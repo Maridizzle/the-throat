@@ -1250,6 +1250,209 @@ function openImport() {
 }
 $("importBtn").addEventListener("click", openImport);
 
+/* patch importer: links between nodes, eras, and placing untimed nodes in eras, from a throat-patch-v1 JSON.
+ * Nodes and eras are matched by exact name (ignoring case and spacing). Nothing is guessed: unmatched or ambiguous
+ * names are flagged and cannot be applied. It only adds. Renames and reorders of eras start unticked.
+ * Nothing is hidden, deleted or retyped. A safety backup is made before anything is saved. */
+const PATCH_FORMAT = "throat-patch-v1", PATCH_MAX = 300;
+const nameKey = (s) => String(s == null ? "" : s).toLowerCase().replace(/[‘’]/g, "'").replace(/[“”]/g, '"').replace(/\s+/g, " ").trim();
+const q = (s) => "“" + String(s).slice(0, 80) + "”";
+function nodeByName(name) {
+  if (typeof name !== "string" || !name.trim()) return { err: "no node name was given" };
+  const k = nameKey(name), hits = graph.nodes.filter((n) => nameKey(n.name) === k);
+  if (hits.length === 1) return { node: hits[0] };
+  return { err: hits.length ? q(name) + " matches " + hits.length + " nodes, so it is ambiguous" : "no node is named " + q(name) };
+}
+function parsePatchText(text) {
+  let obj = null;
+  try { obj = JSON.parse(text); } catch (e) { // tolerate a code fence or a sentence around the JSON
+    const a = text.indexOf("{"), b = text.lastIndexOf("}");
+    if (a >= 0 && b > a) { try { obj = JSON.parse(text.slice(a, b + 1)); } catch (e2) { obj = null; } }
+  }
+  return obj && typeof obj === "object" ? { obj } : { error: "That is not valid JSON." };
+}
+const eIdx = (w, name) => w.findIndex((x) => nameKey(x.name) === nameKey(name));
+// One era change applied to a working list. Used for the preview and again, on the live list, when applying.
+function eraOp(work, it) {
+  const name = it.name, after = it.after;
+  if (it.kind === "era-rename") {
+    const fi = eIdx(work, it.from);
+    if (fi < 0) return { status: "bad", why: "no era is named " + q(it.from) };
+    if (work[fi].name === name) return { status: "have", why: "already named that" };
+    const ci = eIdx(work, name);
+    if (ci >= 0 && ci !== fi) return { status: "bad", why: "an era named " + q(name) + " already exists" };
+    work[fi] = { ...work[fi], name };
+    return { status: "new" };
+  }
+  if (after !== null && after !== "" && eIdx(work, after) < 0) return { status: "bad", why: "the era to follow, " + q(after) + ", does not exist" };
+  const ei = eIdx(work, name);
+  if (it.kind === "era-add") {
+    if (ei >= 0) return { status: "have", why: "already an era" };
+    work.splice(after === null ? work.length : after === "" ? 0 : eIdx(work, after) + 1, 0, { id: uid("era_"), name });
+    return { status: "new" };
+  }
+  if (ei < 0) return { status: "bad", why: "no era is named " + q(name) };
+  if (after !== "" && nameKey(after) === nameKey(name)) return { status: "bad", why: "an era cannot follow itself" };
+  const [e] = work.splice(ei, 1);
+  const at = after === "" ? 0 : eIdx(work, after) + 1;
+  work.splice(at, 0, e);
+  return at === ei ? { status: "have", why: "already in that place" } : { status: "new" };
+}
+// Checks a patch against the map as it is now. Touches nothing. fromAi: everything starts unticked.
+function buildPatch(obj, fromAi) {
+  const items = [], problems = [];
+  if (!obj || typeof obj !== "object" || obj.format !== PATCH_FORMAT) return { items, problems, error: "That is not a Throat patch (expected format \"" + PATCH_FORMAT + "\")." };
+  const arr = (k) => {
+    const v = obj[k];
+    if (v == null) return [];
+    if (!Array.isArray(v)) { problems.push("\"" + k + "\" is not a list, so it was ignored."); return []; }
+    if (v.length > PATCH_MAX) problems.push("\"" + k + "\" has " + v.length + " entries. Only the first " + PATCH_MAX + " are read.");
+    return v.slice(0, PATCH_MAX);
+  };
+  const tick = (on) => !!on && !fromAi;
+  const work = eraList().map((e) => ({ id: e.id, name: String(e.name || "") }));
+  const seenLinks = new Set();
+  arr("eras").forEach((e, i) => {
+    const where = "Era " + (i + 1);
+    if (!e || typeof e !== "object" || typeof e.name !== "string" || !e.name.trim() || e.name.trim().length > LIM.era) return problems.push(where + ": name missing or over " + LIM.era + " characters");
+    const name = e.name.trim(), after = typeof e.after === "string" ? e.after.trim() : null;
+    const from = typeof e.rename_from === "string" && e.rename_from.trim() ? e.rename_from.trim() : null;
+    let kind = "era-add";
+    if (from) { kind = "era-rename"; if (after !== null) problems.push(where + " (" + name.slice(0, 40) + "): \"after\" is ignored when renaming."); }
+    else if (after !== null && eIdx(work, name) >= 0) kind = "era-move";
+    const it = { kind, name, from, after: kind === "era-rename" ? null : after };
+    const r = eraOp(work, it);
+    items.push({ ...it, status: r.status, why: r.why || "", checked: tick(r.status === "new" && kind === "era-add") });
+  });
+  arr("place").forEach((p, i) => {
+    const where = "Placement " + (i + 1);
+    if (!p || typeof p !== "object") return problems.push(where + ": not an object");
+    const n = nodeByName(p.node);
+    if (n.err) return problems.push(where + ": " + n.err);
+    const ei = typeof p.era === "string" ? eIdx(work, p.era) : -1;
+    if (ei < 0) return problems.push(where + " (" + n.node.name.slice(0, 40) + "): no era is named " + q(p.era));
+    const it = { kind: "place", node: n.node, era: work[ei].name };
+    if (hasTime(n.node.raw)) items.push({ ...it, status: "have", why: "it already has a story time, which is left alone", checked: false });
+    else items.push({ ...it, status: "new", why: "", checked: tick(true) });
+  });
+  arr("links").forEach((l, i) => {
+    const where = "Link " + (i + 1);
+    if (!l || typeof l !== "object") return problems.push(where + ": not an object");
+    const a = nodeByName(l.from), b = nodeByName(l.to);
+    if (a.err) return problems.push(where + ": " + a.err);
+    if (b.err) return problems.push(where + ": " + b.err);
+    if (a.node.id === b.node.id) return problems.push(where + ": " + q(a.node.name) + " cannot link to itself");
+    const label = l.label == null ? "" : l.label;
+    if (typeof label !== "string" || label.length > LIM.label) return problems.push(where + ": the label is not text or is over " + LIM.label + " characters");
+    const it = { kind: "link", from: a.node, to: b.node, label: label.trim() }, key = a.node.id + ">" + b.node.id;
+    if (seenLinks.has(key)) return;
+    seenLinks.add(key);
+    if ((a.node.raw.links || []).some((x) => x && x.to === b.node.id)) items.push({ ...it, status: "have", why: "already linked, left as it is", checked: false });
+    else items.push({ ...it, status: "new", why: "", checked: tick(true) });
+  });
+  return { items, problems };
+}
+const ERA_WORDS = { "era-add": "Add era", "era-rename": "Rename era", "era-move": "Move era" };
+function patchText(it) {
+  if (it.kind === "link") return it.from.name + " links to " + it.to.name + (it.label ? " (" + it.label + ")" : "");
+  if (it.kind === "place") return "Place " + q(it.node.name) + " in " + q(it.era);
+  if (it.kind === "era-rename") return "Rename era " + q(it.from) + " to " + q(it.name);
+  const pos = it.after === null ? "" : it.after === "" ? ", first" : ", after " + q(it.after);
+  return ERA_WORDS[it.kind] + " " + q(it.name) + pos;
+}
+function patchBlock(set) {
+  const wrap = el("div", { class: "pblock patch" });
+  const btn = el("button", { type: "button", class: "primary" }, "");
+  const sync = () => { const n = set.items.filter((x) => x.checked).length; btn.disabled = !!set.applied || !n; btn.textContent = set.applied ? "Applied" : n ? "Apply selected (" + n + ")" : "Apply selected"; };
+  const fresh = set.items.filter((x) => x.status === "new").length;
+  wrap.append(el("p", null, set.items.length + " item" + (set.items.length === 1 ? "" : "s") + ": " + fresh + " new, " + (set.items.length - fresh) + " already there or not usable. " + (set.applied ? "Applied." : "Nothing has been changed. Tick what you want.")));
+  const groups = [["Eras", (x) => x.kind.startsWith("era-")], ["Placing nodes in eras", (x) => x.kind === "place"], ["Links", (x) => x.kind === "link"]];
+  for (const [title, test] of groups) {
+    const rows = set.items.filter(test);
+    if (!rows.length) continue;
+    wrap.append(el("h3", null, title));
+    for (const it of rows) {
+      const box = el("input", { type: "checkbox", "aria-label": "Apply: " + patchText(it) });
+      box.checked = it.checked; box.disabled = it.status !== "new" || !!set.applied;
+      box.addEventListener("change", () => { it.checked = box.checked; sync(); });
+      const note = it.status !== "new" ? it.why : it.kind === "era-rename" || it.kind === "era-move" ? "changes something that exists, so it starts unticked" : set.fromAi ? "suggested by the AI, unticked until you agree" : "new";
+      wrap.append(el("label", { class: "improw patchrow" + (it.status === "new" ? "" : " skip") }, box, el("span", { class: "in" }, patchText(it)), el("small", { class: "st" }, note)));
+    }
+  }
+  btn.addEventListener("click", () => applyPatchSet(set, btn, () => { set.applied = true; sync(); }));
+  wrap.append(btn, el("p", { class: "dim pnote" }, "Only additions are saved. Nothing is hidden or deleted. A backup is made first."));
+  if (set.problems.length) wrap.append(el("details", { class: "craw", open: "" }, el("summary", null, set.problems.length + " thing" + (set.problems.length === 1 ? "" : "s") + " could not be used and will not be applied"), el("ul", null, ...set.problems.slice(0, 40).map((x) => el("li", null, x)))));
+  sync();
+  return wrap;
+}
+async function applyPatchSet(set, btn, onDone) {
+  const chosen = set.items.filter((x) => x.checked && x.status === "new");
+  if (!chosen.length) return;
+  if (editing) { toast("Finish or cancel the node you are editing first, then apply.", true); return; }
+  btn.disabled = true; btn.textContent = "Making a backup...";
+  const b = await apiWrite("POST", "/api/backups", {});
+  if (b.status !== 200) { btn.disabled = false; btn.textContent = "Apply selected (" + chosen.length + ")"; toast(planMessage(b, "make the safety backup") + " Nothing was applied.", true); return; }
+  btn.textContent = "Applying...";
+  const report = [];
+  const eraLine = (it, r) => (r.status === "new" ? (it.kind === "era-add" ? "Added era " + q(it.name) + "." : it.kind === "era-rename" ? "Renamed era " + q(it.from) + " to " + q(it.name) + "." : "Moved era " + q(it.name) + ".")
+    : "Era " + q(it.name) + ": " + r.why + (r.status === "bad" ? ". Nothing was changed there." : "."));
+  const eraItems = chosen.filter((x) => x.kind.startsWith("era-"));
+  if (eraItems.length) { // one save for all era changes, merged onto the live list; retried if someone saved first
+    let done = false;
+    for (let attempt = 0; attempt < 3 && !done; attempt++) {
+      const meta = model.meta.get("eras");
+      const work = eraList().map((e) => ({ id: e.id, name: String(e.name || "") }));
+      const res = eraItems.map((it) => ({ it, r: eraOp(work, it) }));
+      if (!res.some((x) => x.r.status === "new")) { res.forEach((x) => report.push(eraLine(x.it, x.r))); done = true; break; }
+      const r = await apiWrite("PUT", "/api/meta/eras", meta ? { data: { eras: work }, base_rev: meta.rev } : { data: { eras: work } });
+      if (r.status === 200 && r.json && r.json.meta) { model.meta.set("eras", r.json.meta); res.forEach((x) => report.push(eraLine(x.it, x.r))); done = true; }
+      else if (r.status === 409 && r.json && r.json.current) model.meta.set("eras", r.json.current);
+      else { report.push("Could not save the era changes (" + (r.status === 401 ? "your sign-in ended" : "error " + r.status) + ")."); done = true; }
+    }
+    if (!done) report.push("The eras kept changing while saving, so none of the era changes were made.");
+  }
+  for (const it of chosen.filter((x) => x.kind === "place")) {
+    const e = eraList().find((x) => nameKey(x.name) === nameKey(it.era));
+    if (!e) { report.push("Skipped placing " + q(it.node.name) + ": the era " + q(it.era) + " does not exist (it was not applied)."); continue; }
+    const res = await applyPatch({ kind: "patch", id: it.node.id, links: [], time: { era: String(e.id), order: null } });
+    report.push(res.ok ? (res.note ? "Left " + q(it.node.name) + " alone (" + res.note + ")." : "Placed " + q(it.node.name) + " in " + q(it.era) + ".") : "Skipped " + q(it.node.name) + ": " + res.why + ". Nothing was changed there.");
+  }
+  const byFrom = new Map();
+  for (const it of chosen.filter((x) => x.kind === "link")) { if (!byFrom.has(it.from.id)) byFrom.set(it.from.id, []); byFrom.get(it.from.id).push(it); }
+  for (const [id, its] of byFrom) {
+    const res = await applyPatch({ kind: "patch", id, links: its.map((x) => ({ to: x.to.id, label: x.label })) });
+    const nm = its[0].from.name;
+    report.push(res.ok ? (res.note ? "Left " + q(nm) + " alone (" + res.note + ")." : "Linked from " + q(nm) + ": " + its.map((x) => x.to.name).join(", ") + ".") : "Skipped the links from " + q(nm) + ": " + res.why + ". Nothing was changed there.");
+  }
+  onDone();
+  refreshAll(false);
+  const okCount = report.filter((x) => /^(Added|Renamed|Moved|Placed|Linked)/.test(x)).length;
+  await choose("Done", el("div", null, el("p", null, okCount + " of " + report.length + " step" + (report.length === 1 ? "" : "s") + " made a change. A backup of the map from just before is in History (the newest “Made by hand”)."),
+    el("ul", { class: "chits" }, ...report.map((x) => el("li", null, x)))), [{ id: "ok", label: "Close", kind: "primary" }]);
+}
+function openPatchImport() {
+  const ta = el("textarea", { rows: 8, id: "patch-text", placeholder: "Paste a throat-patch-v1 patch here, or choose a file below.", "aria-label": "Patch JSON" });
+  const fileIn = el("input", { type: "file", accept: ".json,application/json,text/plain", id: "patch-file", "aria-label": "Choose a patch file" });
+  const out = el("div", { class: "imp" }, el("p", { class: "dim" }, "Paste or choose a patch, then press Check. You will see every change before anything is saved. Names must match your nodes and eras exactly (case and spacing are ignored)."));
+  const check = el("button", { type: "button", class: "primary", id: "patch-check", onclick: () => {
+    const text = ta.value.trim();
+    if (!text) { out.replaceChildren(el("p", { class: "warn" }, "Paste a patch or choose a file first.")); return; }
+    const p = parsePatchText(text);
+    if (p.error) { out.replaceChildren(el("p", { class: "warn" }, p.error)); return; }
+    const r = buildPatch(p.obj, false);
+    if (r.error) { out.replaceChildren(el("p", { class: "warn" }, r.error)); return; }
+    if (!r.items.length && !r.problems.length) { out.replaceChildren(el("p", { class: "warn" }, "The patch has no links, eras or placements in it.")); return; }
+    out.replaceChildren(patchBlock({ items: r.items, problems: r.problems }));
+  } }, "Check patch");
+  fileIn.addEventListener("change", async () => {
+    const f = fileIn.files[0];
+    if (!f) return;
+    try { ta.value = await f.text(); } catch (e) { out.replaceChildren(el("p", { class: "warn" }, "Could not read that file.")); }
+  });
+  openModal("Import a patch", el("div", null, ta, fileIn, el("div", { class: "bar" }, check), out), [{ label: "Close", kind: "quiet", onclick: closeModal }], { wide: true, sticky: true });
+}
+$("patchBtn").addEventListener("click", openPatchImport);
+
 /* export: read-only copies of everything, made in the browser from what is already loaded.
  * Nothing here writes to the server. The readable copy (.md) is for reading and keeping;
  * the full backup (.json) is the server's own archive and is the one to restore from. */
@@ -1510,7 +1713,9 @@ const ANSWER_SYSTEM = "You are a careful story analyst and editor's assistant fo
   "Rules: every proposal needs a \"quote\" copied exactly, word for word, from the writer's message or from a node's text, that supports it. " +
   "patch and replace may only target nodes whose FULL TEXT is shown below. A replace's \"find\" must be copied exactly from that node's summary and appear there once. Keep each replacement as small as possible. " +
   "Never rename or retype a node, and do not repeat what a node already says. Leave \"time\" as null unless the text clearly states where the node sits in the story; if it does, use {\"era\":\"<an era id from the list given>\",\"order\":<number>}. " +
-  "If the writer asks you to change a node you only have a snippet of, say you need its full text and propose nothing. At most 25 proposals.";
+  "If the writer asks you to change a node you only have a snippet of, say you need its full text and propose nothing. At most 25 proposals. " +
+  "Only when the writer asks you to organize links, eras or story placement, you may add a top-level \"patch\" next to reply and proposals: {\"format\":\"throat-patch-v1\",\"links\":[{\"from\":\"<exact node name from the INDEX>\",\"to\":\"<exact node name>\",\"label\":\"...\"}],\"eras\":[{\"name\":\"...\",\"rename_from\":\"<existing era name, optional>\",\"after\":\"<era name to follow, or empty for first, optional>\"}],\"place\":[{\"node\":\"<exact node name>\",\"era\":\"<existing era name>\"}]}. " +
+  "Use node and era names exactly as listed, never invent a name, and only suggest links the text supports. Otherwise leave patch out.";
 const PICK_SYSTEM = "You help a story-map chat decide which nodes' full text is needed to answer the writer. Reply with ONLY a JSON object and no other text: {\"node_ids\":[\"id\", ...],\"why\":\"...\"}. " +
   "Choose ids from the index, at most 12: nodes the writer names or implies, nodes they want changed or linked to, and closely linked nodes when relevant. If the index alone is enough, return an empty list.";
 const chat = { open: false, mode: "groq", tray: [], msgs: [], busy: false, status: null, ack: { set: new Set(), choice: "send" } };
@@ -1624,6 +1829,7 @@ function renderLog() {
     if (m.raw) box.append(el("details", { class: "craw" }, el("summary", null, "What the AI actually said"), el("pre", null, m.raw)));
     if (m.report) box.append(el("button", { type: "button", class: "retry", onclick: () => openReport(m.report.rep, m.report.ctx, m.report.mode, m.report.model) }, "Open the report"));
     if (m.set && m.set.items.length) box.append(proposalBlock(m.set));
+    if (m.pset) box.append(patchBlock(m.pset));
     else if (m.set && m.set.skipped && m.set.skipped.length) box.append(el("details", { class: "craw" }, el("summary", null, "The AI suggested changes that could not be used"), el("ul", null, ...m.set.skipped.map((x) => el("li", null, x)))));
     if (m.role === "assistant" && m.mode === "groq" && (m.payload || m.rerun)) {
       box.append(el("button", { type: "button", class: "retry", onclick: () => chatRetryOpenAI(i) }, "Not good enough? Retry with OpenAI (costs money, asks first)"));
@@ -1819,13 +2025,14 @@ async function chatAnswer(ctx, mode, pre) {
   const reply = await chatRun(mode, ctx.messages, { raw: true, json: true, tier: "accurate", maxOut: ctx.maxOut || CHAT_ANSWER_MAX_OUT, purpose: "chat", preConfirmed: pre });
   if (!reply) { renderLog(); renderChat(); return false; }
   const j = reply.json;
-  let text, set = null;
+  let text, set = null, pset = null;
   if (j && typeof j.reply === "string") {
     text = j.reply.trim() || "(the AI gave no reply text)";
     if (Array.isArray(j.proposals) && j.proposals.length) set = readProposals({ json: { proposals: j.proposals } }, ctx);
+    if (j.patch && typeof j.patch === "object" && !Array.isArray(j.patch)) { const pb = buildPatch({ ...j.patch, format: PATCH_FORMAT }, true); if (pb.items.length || pb.problems.length) pset = { ...pb, fromAi: true }; }
   } else text = (reply.text || "").trim() || "(the AI returned no text)";
   if (reply.truncated) text += "\n\n(The reply hit the length limit and may be cut off.)";
-  chat.msgs.push({ role: "assistant", mode, cost: reply.usage.cost_usd, content: text, set, rerun: (m2) => chatAnswer(ctx, m2) });
+  chat.msgs.push({ role: "assistant", mode, cost: reply.usage.cost_usd, content: text, set, pset, rerun: (m2) => chatAnswer(ctx, m2) });
   renderLog(); renderChat();
   return true;
 }
